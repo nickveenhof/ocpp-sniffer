@@ -41,12 +41,17 @@ class AioHTTPWSAdapter:
 
 @web.middleware
 async def log_all_requests(request, handler):
+    real_ip = request.headers.get(
+        "CF-Connecting-IP", request.headers.get("X-Forwarded-For", request.remote)
+    )
     _LOGGER.info(
-        "HTTP %s %s from %s WS-Proto=%s",
+        "HTTP %s %s from %s (proxy: %s) WS-Proto=%s UA=%s",
         request.method,
         request.path_qs,
+        real_ip,
         request.remote,
         request.headers.get("Sec-WebSocket-Protocol", ""),
+        request.headers.get("User-Agent", ""),
     )
     return await handler(request)
 
