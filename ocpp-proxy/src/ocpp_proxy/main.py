@@ -18,36 +18,36 @@ _LOGGER = logging.getLogger(__name__)
 
 _charger_info: dict = {
     "connected": False,
-    "vendor": None,
-    "model": None,
-    "last_id_tag": None,
-    "last_status": None,
+    "vendor": "unknown",
+    "model": "unknown",
+    "last_id_tag": "",
+    "last_status": "Available",
     "evcc_status": "A",
-    "firmware": None,
-    "serial": None,
+    "firmware": "unknown",
+    "serial": "unknown",
 }
 
 _meter_values: dict = {
-    "energy_wh": None,
-    "power_w": None,
-    "current_l1": None,
-    "current_l2": None,
-    "current_l3": None,
-    "voltage_l1": None,
-    "voltage_l2": None,
-    "voltage_l3": None,
+    "energy_wh": 0.0,
+    "power_w": 0.0,
+    "current_l1": 0.0,
+    "current_l2": 0.0,
+    "current_l3": 0.0,
+    "voltage_l1": 0.0,
+    "voltage_l2": 0.0,
+    "voltage_l3": 0.0,
     "timestamp": None,
 }
 
 _last_session: dict = {
-    "id_tag": None,
-    "transaction_id": None,
-    "start_time": None,
-    "stop_time": None,
-    "meter_start_wh": None,
-    "meter_stop_wh": None,
-    "energy_wh": None,
-    "stop_reason": None,
+    "id_tag": "",
+    "transaction_id": 0,
+    "start_time": "",
+    "stop_time": "",
+    "meter_start_wh": 0.0,
+    "meter_stop_wh": 0.0,
+    "energy_wh": 0.0,
+    "stop_reason": "",
 }
 
 _data_transfer_log: list = []
