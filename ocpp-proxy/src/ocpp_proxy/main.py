@@ -216,7 +216,7 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse(protocols=("ocpp1.6", "ocpp2.0.1"))
     await ws.prepare(request)
 
-    upstream_url = config.ocpp_services[0].get("url") if config.ocpp_services else None
+    upstream_url = config.upstream_url or None
 
     _charger_info["connected"] = True
     _active_charger_ws = ws
@@ -454,9 +454,7 @@ async def status_handler(request: web.Request) -> web.Response:
             "charger_model": _charger_info["model"],
             "last_id_tag": _charger_info["last_id_tag"],
             "last_status": _charger_info["last_status"],
-            "upstream": request.app["config"].ocpp_services[0].get("url")
-            if request.app["config"].ocpp_services
-            else None,
+            "upstream": request.app["config"].upstream_url or None,
         }
     )
 
@@ -493,9 +491,9 @@ async def welcome_handler(_request: web.Request) -> web.Response:
 </ul>
 <h2>Command endpoints (POST)</h2>
 <ul>
-  <li>POST /enable/true - RemoteStartTransaction</li>
-  <li>POST /enable/false - RemoteStopTransaction</li>
-  <li>POST /maxcurrent/{amps} - SetChargingProfile</li>
+  <li>POST /enable/true - resume charging (SetChargingProfile min_current A)</li>
+  <li>POST /enable/false - pause charging (SetChargingProfile 0A)</li>
+  <li>POST /maxcurrent/{amps} - set max current (SetChargingProfile)</li>
   <li>POST /command - raw OCPP command {"action":"...","payload":{...}}</li>
 </ul>
 </body></html>"""

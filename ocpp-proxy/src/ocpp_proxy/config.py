@@ -23,7 +23,6 @@ class Config:
             _LOGGER.info("Loaded config from %s", json_path)
         else:
             _LOGGER.warning("No config file found at %s or %s", config_path, json_path)
-        _LOGGER.info("Upstream URL: %s", self.upstream_url or "(none)")
 
     @property
     def upstream_url(self) -> str:
@@ -40,10 +39,3 @@ class Config:
     @property
     def auto_throttle(self) -> bool:
         return bool(self._cfg.get("auto_throttle", True))
-
-    @property
-    def ocpp_services(self) -> list[dict]:
-        url = self.upstream_url
-        if url:
-            return [{"id": "upstream", "url": url}]
-        return []
