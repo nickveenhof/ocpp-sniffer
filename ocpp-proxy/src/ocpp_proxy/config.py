@@ -34,6 +34,14 @@ class Config:
         return str(self._cfg.get("charger_password", ""))
 
     @property
+    def min_current(self) -> int:
+        return int(self._cfg.get("min_current", 6))
+
+    @property
+    def auto_throttle(self) -> bool:
+        return bool(self._cfg.get("auto_throttle", True))
+
+    @property
     def ocpp_services(self) -> list[dict]:
         url = self.upstream_url
         if url:

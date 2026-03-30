@@ -54,6 +54,8 @@ _data_transfer_log: list = []
 
 _active_charger_ws = None
 _pending_responses: dict = {}
+_auto_throttle: bool = True
+_min_current: int = 6
 
 
 @web.middleware
@@ -73,11 +75,12 @@ async def log_all_requests(request, handler):
     return await handler(request)
 
 
-def _sniff(raw: str) -> None:
+def _sniff(raw: str) -> bool:
+    """Sniff OCPP messages. Returns True if StartTransaction detected."""
     try:
         msg = json.loads(raw)
         if not isinstance(msg, list) or len(msg) < 3:
-            return
+            return False
         msg_type = msg[0]
         action = msg[2] if len(msg) > 2 else ""
         payload = msg[3] if len(msg) > 3 else {}
@@ -87,7 +90,7 @@ def _sniff(raw: str) -> None:
             if msg_id in _pending_responses:
                 _pending_responses[msg_id]["response"] = msg
                 _pending_responses[msg_id]["event"].set()
-            return
+            return False
 
         if action in ("Authorize", "StartTransaction"):
             id_tag = payload.get("idTag") or payload.get("id_tag")
@@ -101,6 +104,7 @@ def _sniff(raw: str) -> None:
                 _last_session["stop_time"] = None
                 _last_session["stop_reason"] = None
                 _last_session["energy_wh"] = None
+                return True
 
         if action == "BootNotification":
             _charger_info["vendor"] = payload.get("chargePointVendor")
@@ -177,8 +181,9 @@ def _sniff(raw: str) -> None:
                         _meter_values["voltage_l2"] = float(value)
                     elif measurand == "Voltage" and phase == "L3-N":
                         _meter_values["voltage_l3"] = float(value)
+        return False
     except Exception:
-        pass
+        return False
 
 
 async def _connect_upstream(url: str):
@@ -227,12 +232,38 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
 
     pending_charger_msgs: asyncio.Queue = asyncio.Queue()
 
+    async def throttle_to_zero():
+        await asyncio.sleep(1)
+        try:
+            _LOGGER.info("AUTO-THROTTLE: setting current to 0A")
+            await _send_to_charger(
+                "SetChargingProfile",
+                {
+                    "connectorId": 1,
+                    "csChargingProfiles": {
+                        "chargingProfileId": 2,
+                        "stackLevel": 1,
+                        "chargingProfilePurpose": "TxProfile",
+                        "chargingProfileKind": "Absolute",
+                        "chargingSchedule": {
+                            "chargingRateUnit": "A",
+                            "chargingSchedulePeriod": [{"startPeriod": 0, "limit": 0}],
+                        },
+                    },
+                },
+            )
+            _LOGGER.info("AUTO-THROTTLE: charger set to 0A")
+        except Exception:
+            _LOGGER.exception("AUTO-THROTTLE: failed to set 0A")
+
     async def charger_to_upstream():
         async for msg in ws:
             if msg.type != web.WSMsgType.TEXT:
                 break
             _LOGGER.info("CHARGER -> UPSTREAM: %s", msg.data)
-            _sniff(msg.data)
+            is_start = _sniff(msg.data)
+            if is_start and _auto_throttle:
+                asyncio.create_task(throttle_to_zero())
             await pending_charger_msgs.put(msg.data)
 
     async def upstream_relay():
@@ -327,16 +358,33 @@ async def command_handler(request: web.Request) -> web.Response:
 
 async def enable_handler(request: web.Request) -> web.Response:
     enable = request.match_info.get("enable", "true").lower() == "true"
-    action = "RemoteStartTransaction" if enable else "RemoteStopTransaction"
     if not _active_charger_ws:
         return web.json_response({"error": "no charger connected"}, status=503)
     try:
-        if enable:
-            payload = {"connectorId": 1, "idTag": _charger_info.get("last_id_tag") or "evcc"}
-        else:
-            payload = {"transactionId": _last_session.get("transaction_id", 1)}
-        response = await _send_to_charger(action, payload)
-        return web.json_response({"action": action, "response": response})
+        min_current = request.app["config"].min_current
+        limit = min_current if enable else 0
+        payload = {
+            "connectorId": 1,
+            "csChargingProfiles": {
+                "chargingProfileId": 2,
+                "stackLevel": 1,
+                "chargingProfilePurpose": "TxProfile",
+                "chargingProfileKind": "Absolute",
+                "chargingSchedule": {
+                    "chargingRateUnit": "A",
+                    "chargingSchedulePeriod": [{"startPeriod": 0, "limit": limit}],
+                },
+            },
+        }
+        response = await _send_to_charger("SetChargingProfile", payload)
+        return web.json_response(
+            {
+                "action": "SetChargingProfile",
+                "enable": enable,
+                "limit_amps": limit,
+                "response": response,
+            }
+        )
     except asyncio.TimeoutError:
         return web.json_response({"error": "charger did not respond"}, status=504)
     except Exception as e:
@@ -455,7 +503,14 @@ async def welcome_handler(_request: web.Request) -> web.Response:
 
 
 async def init_app() -> web.Application:
+    global _auto_throttle, _min_current
     config = Config()
+    _auto_throttle = config.auto_throttle
+    _min_current = config.min_current
+    if _auto_throttle:
+        _LOGGER.info(
+            "Auto-throttle enabled: charger set to 0A on StartTransaction, evcc controls via /enable"
+        )
     if config.charger_password:
         _LOGGER.info("Charger password configured: only authenticated chargers accepted")
     else:
