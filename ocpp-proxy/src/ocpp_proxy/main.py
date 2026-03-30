@@ -1,298 +1,209 @@
 import asyncio
 import csv
 import io
+import json
 import logging
 import os
 
+import websockets
 from aiohttp import WSCloseCode, web
 
-from .backend_manager import BackendManager
-from .charge_point_factory import ChargePointFactory
 from .config import Config
-from .ha_bridge import HABridge
 from .logger import EventLogger
-from .ocpp_service_manager import OCPPServiceManager
 
 _LOGGER = logging.getLogger(__name__)
 
-
-class AioHTTPWSAdapter:
-    """Bridges aiohttp WebSocketResponse to the recv/send interface expected by the ocpp library."""
-
-    def __init__(self, ws):
-        self._ws = ws
-
-    async def send(self, message):
-        await self._ws.send_str(message)
-
-    async def recv(self):
-        msg = await self._ws.receive()
-        if msg.type == web.WSMsgType.TEXT:
-            return msg.data
-        if msg.type in (web.WSMsgType.CLOSE, web.WSMsgType.CLOSING, web.WSMsgType.CLOSED):
-            raise ConnectionError(f"WebSocket closed: {msg.type}")
-        if msg.type == web.WSMsgType.ERROR:
-            raise ConnectionError(f"WebSocket error: {self._ws.exception()}")
-        raise ConnectionError(f"Unexpected message type: {msg.type}")
-
-    async def close(self, code=None, reason=None):
-        await self._ws.close()
+_charger_info: dict = {
+    "connected": False,
+    "vendor": None,
+    "model": None,
+    "last_id_tag": None,
+    "last_status": None,
+}
 
 
 @web.middleware
 async def log_all_requests(request, handler):
     real_ip = request.headers.get(
-        "CF-Connecting-IP", request.headers.get("X-Forwarded-For", request.remote)
+        "CF-Connecting-IP",
+        request.headers.get("X-Forwarded-For", request.remote),
     )
     _LOGGER.info(
-        "HTTP %s %s from %s (proxy: %s) WS-Proto=%s UA=%s",
+        "HTTP %s %s from %s WS-Proto=%s UA=%s",
         request.method,
         request.path_qs,
         real_ip,
-        request.remote,
         request.headers.get("Sec-WebSocket-Protocol", ""),
         request.headers.get("User-Agent", ""),
     )
-    _LOGGER.info("Headers: %s", dict(request.headers))
     return await handler(request)
 
 
+def _sniff(raw: str) -> None:
+    try:
+        msg = json.loads(raw)
+        if not isinstance(msg, list) or len(msg) < 3:
+            return
+        action = msg[2] if len(msg) > 2 else ""
+        payload = msg[3] if len(msg) > 3 else {}
+        if action in ("Authorize", "StartTransaction"):
+            id_tag = payload.get("idTag") or payload.get("id_tag")
+            if id_tag:
+                _charger_info["last_id_tag"] = id_tag
+                _LOGGER.info("Captured idTag=%s from %s", id_tag, action)
+        if action == "BootNotification":
+            _charger_info["vendor"] = payload.get("chargePointVendor")
+            _charger_info["model"] = payload.get("chargePointModel")
+        if action == "StatusNotification":
+            _charger_info["last_status"] = payload.get("status")
+    except Exception:
+        pass
+
+
 async def charger_handler(request: web.Request) -> web.WebSocketResponse:
-    """Handle WebSocket connection from the EV charger (CSMS role)."""
     ws = web.WebSocketResponse(protocols=("ocpp1.6", "ocpp2.0.1"))
     await ws.prepare(request)
 
-    adapted_ws = AioHTTPWSAdapter(ws)
     config = request.app["config"]
-    cp = ChargePointFactory.create_charge_point(
-        "CP-1",
-        adapted_ws,
-        version=config.ocpp_version,
-        manager=request.app["backend_manager"],
-        ha_bridge=request.app["ha_bridge"],
-        event_logger=request.app["event_logger"],
-        auto_detect=config.auto_detect_ocpp_version,
-    )
-    # store active charge point for proxying control requests
-    request.app["charge_point"] = cp
-    _LOGGER.info(f"Charger connected using OCPP {cp.ocpp_version}")
+    upstream_url = None
+    if config.ocpp_services:
+        upstream_url = config.ocpp_services[0].get("url")
+
+    _charger_info["connected"] = True
+    _LOGGER.info("Charger connected. Upstream: %s", upstream_url or "none")
+
+    upstream_ws = None
+    if upstream_url:
+        try:
+            upstream_ws = await websockets.connect(
+                upstream_url,
+                subprotocols=["ocpp1.6"],
+                ping_interval=30,
+                ping_timeout=10,
+            )
+            _LOGGER.info("Connected to upstream %s", upstream_url)
+        except Exception:
+            _LOGGER.exception("Failed to connect to upstream")
+
+    async def charger_to_upstream():
+        async for msg in ws:
+            if msg.type != web.WSMsgType.TEXT:
+                break
+            _LOGGER.info("CHARGER -> UPSTREAM: %s", msg.data)
+            _sniff(msg.data)
+            if upstream_ws:
+                try:
+                    await upstream_ws.send(msg.data)
+                except Exception:
+                    _LOGGER.exception("Failed to send to upstream")
+
+    async def upstream_to_charger():
+        if not upstream_ws:
+            return
+        try:
+            async for raw in upstream_ws:
+                _LOGGER.info("UPSTREAM -> CHARGER: %s", raw)
+                try:
+                    await ws.send_str(raw)
+                except Exception:
+                    _LOGGER.exception("Failed to send to charger")
+                    break
+        except Exception:
+            _LOGGER.info("Upstream connection closed")
+
     try:
-        await cp.start()
+        await asyncio.gather(charger_to_upstream(), upstream_to_charger())
     except Exception:
-        _LOGGER.exception("Charger handler error")
+        _LOGGER.exception("Proxy error")
     finally:
+        _charger_info["connected"] = False
+        if upstream_ws:
+            await upstream_ws.close()
         await ws.close(code=WSCloseCode.GOING_AWAY)
     return ws
 
 
 async def sessions_json(request: web.Request) -> web.Response:
-    """Return all charging sessions as JSON."""
     sessions = request.app["event_logger"].get_sessions()
     return web.json_response(sessions)
 
 
 async def sessions_csv(request: web.Request) -> web.Response:
-    """Return all charging sessions as CSV."""
     sessions = request.app["event_logger"].get_sessions()
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["timestamp", "backend_id", "duration_s", "energy_kwh", "revenue"])
+    writer.writerow(["timestamp", "backend_id", "duration_s", "energy_kwh", "revenue", "id_tag"])
     for s in sessions:
         writer.writerow(
-            [s["timestamp"], s["backend_id"], s["duration_s"], s["energy_kwh"], s["revenue"]]
+            [
+                s["timestamp"],
+                s["backend_id"],
+                s["duration_s"],
+                s["energy_kwh"],
+                s["revenue"],
+                s.get("id_tag", ""),
+            ]
         )
     return web.Response(text=output.getvalue(), content_type="text/csv")
 
 
-async def override_handler(request: web.Request) -> web.Response:
-    """Manually override the active control owner."""
-    try:
-        data = await request.json()
-    except ValueError:
-        return web.Response(status=400, text="Invalid JSON")
-
-    backend_id = data.get("backend_id")
-    manager = request.app["backend_manager"]
-    manager.release_control()
-    ok = await manager.request_control(backend_id)
-    return web.json_response({"success": ok, "owner": manager._lock_owner})
-
-
 async def status_handler(request: web.Request) -> web.Response:
-    """Get current control owner status and backend information."""
-    backend_manager = request.app["backend_manager"]
-    status = backend_manager.get_backend_status()
-    cp = request.app.get("charge_point")
-    if cp:
-        status["charger_connected"] = cp.charger_connected
-        status["charger_vendor"] = cp.charger_vendor
-        status["charger_model"] = cp.charger_model
-        status["last_id_tag"] = cp.last_id_tag
-        status["last_status"] = cp.last_status
-    else:
-        status["charger_connected"] = False
-        status["last_id_tag"] = None
-    return web.json_response(status)
-
-
-async def charger_info_handler(request: web.Request) -> web.Response:
-    cp = request.app.get("charge_point")
-    if not cp:
-        return web.json_response({"connected": False, "id_tag": None})
     return web.json_response(
         {
-            "connected": cp.charger_connected,
-            "vendor": cp.charger_vendor,
-            "model": cp.charger_model,
-            "last_id_tag": cp.last_id_tag,
-            "last_status": cp.last_status,
+            "charger_connected": _charger_info["connected"],
+            "charger_vendor": _charger_info["vendor"],
+            "charger_model": _charger_info["model"],
+            "last_id_tag": _charger_info["last_id_tag"],
+            "last_status": _charger_info["last_status"],
+            "upstream": request.app["config"].ocpp_services[0].get("url")
+            if request.app["config"].ocpp_services
+            else None,
         }
     )
 
 
+async def charger_info_handler(request: web.Request) -> web.Response:
+    return web.json_response(_charger_info.copy())
+
+
 async def welcome_handler(_request: web.Request) -> web.Response:
-    """Serve a simple welcome page for browser access."""
-    html_content = """\
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>EV Charger Proxy</title>
-    <link
-      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css"
-      rel="stylesheet"
-      integrity="sha384-ENjdO4Dr2bkBIFxQpeoL2m0U5p3YhN9j+S8E6eE/d2RH+8abtTE1Pi6jizoU3m1G"
-      crossorigin="anonymous"
-    />
-</head>
-<body class="bg-light">
-  <div class="container py-5">
-    <div class="text-center mb-4">
-      <h1 class="display-4">EV Charger Proxy</h1>
-      <p class="lead">Proxy your EV charger to multiple backends and log charging sessions.</p>
-    </div>
-    <div class="card">
-      <div class="card-header">
-        Available Endpoints
-      </div>
-      <ul class="list-group list-group-flush">
-        <li class="list-group-item"><a href="/charger">/charger</a> (WebSocket for charger)</li>
-        <li class="list-group-item">
-          <a href="/backend?id=your_backend_id">/backend?id=your_backend_id</a>
-          (WebSocket for backend)
-        </li>
-        <li class="list-group-item"><a href="/sessions">/sessions</a> (JSON session data)</li>
-        <li class="list-group-item">
-          <a href="/sessions.csv">/sessions.csv</a> (CSV session data)
-        </li>
-        <li class="list-group-item">
-          <a href="/status">/status</a> (backend status and control owner)
-        </li>
-        <li class="list-group-item">
-          <a href="/override">/override</a> (POST to override control owner)
-        </li>
-      </ul>
-    </div>
-  </div>
-</body>
-</html>
-"""
-    return web.Response(text=html_content, content_type="text/html")
-
-
-async def backend_handler(request: web.Request) -> web.WebSocketResponse:
-    """Handle WebSocket connections from backend service clients."""
-    ws = web.WebSocketResponse()
-    await ws.prepare(request)
-    backend_id = request.query.get("id", "unknown")
-    manager: BackendManager = request.app["backend_manager"]
-    manager.subscribe(backend_id, ws)
-    _LOGGER.info("Backend %s connected", backend_id)
-    try:
-        async for msg in ws:
-            if msg.type == web.WSMsgType.TEXT:
-                data = msg.json()
-                action = data.get("action")
-                cp = request.app.get("charge_point")
-                # Remote start request
-                if action == "RemoteStartTransaction" and cp:
-                    allowed = await manager.request_control(backend_id)
-                    if not allowed:
-                        await ws.send_json({"error": "control_locked"})
-                        continue
-                    req = await cp.send_remote_start_transaction(
-                        connector_id=data.get("connector_id", 1), id_tag=data.get("id_tag")
-                    )
-                    await ws.send_json({"action": "RemoteStartTransaction", "result": req})
-                # Remote stop request
-                elif action == "RemoteStopTransaction" and cp:
-                    req = await cp.send_remote_stop_transaction(
-                        transaction_id=data.get("transaction_id")
-                    )
-                    await ws.send_json({"action": "RemoteStopTransaction", "result": req})
-                else:
-                    await ws.send_json({"error": "unknown_action"})
-    except asyncio.CancelledError:
-        pass
-    finally:
-        manager.unsubscribe(backend_id)
-        await ws.close(code=WSCloseCode.GOING_AWAY)
-        _LOGGER.info("Backend %s disconnected", backend_id)
-    return ws
+    html = """<!DOCTYPE html>
+<html><head><title>OCPP Transparent Proxy</title></head><body>
+<h1>OCPP Transparent Proxy</h1>
+<ul>
+  <li><a href="/charger_info">/charger_info</a> - last idTag and charger state</li>
+  <li><a href="/status">/status</a> - upstream and charger status</li>
+  <li><a href="/sessions">/sessions</a> - completed sessions (JSON)</li>
+  <li><a href="/sessions.csv">/sessions.csv</a> - completed sessions (CSV)</li>
+</ul>
+</body></html>"""
+    return web.Response(text=html, content_type="text/html")
 
 
 async def init_app() -> web.Application:
-    """Initialize application components and routes."""
     config = Config()
-    ha_url = os.getenv("HA_URL")
-    ha_token = os.getenv("HA_TOKEN")
-    ha = HABridge(ha_url, ha_token) if ha_url and ha_token else None
-
-    # Initialize OCPP service manager
-    ocpp_service_manager = OCPPServiceManager(config)
 
     app = web.Application(middlewares=[log_all_requests])
     app["config"] = config
-    app["backend_manager"] = BackendManager(config, ha, ocpp_service_manager)
-    app["ha_bridge"] = ha
     app["event_logger"] = EventLogger(db_path=os.getenv("LOG_DB_PATH", "usage_log.db"))
-    app["ocpp_service_manager"] = ocpp_service_manager
-
-    # Set app reference for backend manager
-    app["backend_manager"].set_app_reference(app)
-
-    # Start OCPP service connections
-    await ocpp_service_manager.start_services()
 
     app.add_routes(
         [
             web.get("/", welcome_handler),
             web.get("/charger", charger_handler),
             web.get("/charger/{charger_id}", charger_handler),
-            web.get("/backend", backend_handler),
             web.get("/sessions", sessions_json),
             web.get("/sessions.csv", sessions_csv),
             web.get("/status", status_handler),
             web.get("/charger_info", charger_info_handler),
-            web.post("/override", override_handler),
         ]
     )
     return app
 
 
-async def cleanup_app(app: web.Application) -> None:
-    """Cleanup function to properly close OCPP service connections."""
-    if "ocpp_service_manager" in app:
-        await app["ocpp_service_manager"].stop_all_services()
-
-
 def main() -> None:
-    """Entrypoint for the proxy server."""
     logging.basicConfig(level=logging.INFO)
     app = asyncio.run(init_app())
-    # Add cleanup handler
-    app.on_cleanup.append(cleanup_app)
     web.run_app(app, port=int(os.getenv("PORT", 9000)))
 
 

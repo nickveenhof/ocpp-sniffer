@@ -1,7 +1,7 @@
-name: OCPP Proxy
-version: '0.1.6'
+name: OCPP Sniffer
+version: '0.1.7'
 slug: ocpp-proxy
-description: 'OCPP 1.6 JSON WebSocket proxy for EV charger sharing'
+description: 'Transparent OCPP proxy that forwards charger traffic to your CPO and captures RFID idTags for EVCC vehicle identification'
 homeassistant_api: true
 init: false
 arch:

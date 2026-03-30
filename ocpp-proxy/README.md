@@ -1,268 +1,121 @@
-# OCPP Proxy - Multi-Version EV Charger Sharing
+# OCPP Sniffer - Transparent OCPP Proxy for RFID Identification
 
-A secure, lightweight OCPP proxy server designed as a Home Assistant add-on that enables intelligent EV charger sharing. Supports both **OCPP 1.6** and **OCPP 2.0.1** protocols with automatic version detection.
+A minimal, transparent OCPP 1.6 proxy that sits between your EV charger and your CPO backend (e.g. Wattify). It forwards all traffic unchanged and captures RFID idTags for use in EVCC vehicle identification.
 
-The proxy sits between a single EV charger and multiple backend services (energy providers, fleet management, charging networks), allowing multiple third-party services to use spare charger capacity while keeping the homeowner in full control.
+## What it does
 
-## ✨ Key Features
-
-### 🔌 **Multi-Protocol Support**
-- **OCPP 1.6** and **OCPP 2.0.1** support with automatic version detection
-- WebSocket subprotocol negotiation and header-based version detection
-- Unified API across both protocol versions
-
-### 🏠 **Homeowner Control**
-- User maintains full control and can override any backend at any time
-- Smart arbitration with configurable rules and preferences
-- Home Assistant integration for monitoring and manual overrides
-
-### ⚡ **Intelligent Sharing**
-- Single charger connection supports multiple backend subscribers
-- Real-time event broadcasting to all connected services
-- Automatic control arbitration with safety-first design
-
-### 🔗 **Dual Connection Types**
-- **WebSocket Backends**: Traditional services connect to the proxy
-- **OCPP Service Clients**: Proxy connects outbound to OCPP services
-- Both types compete for control using the same arbitration rules
-
-### 🛡️ **Safety & Security**
-- Automatic safety controls prevent conflicts and handle charger faults
-- Rate limiting and provider filtering (allowlist/blocklist support)
-- Charger fault detection automatically revokes backend control
-
-### 📊 **Monitoring & Analytics**
-- Session tracking with SQLite persistence
-- Revenue tracking for different providers
-- CSV export functionality via REST API
-- Real-time status monitoring via Home Assistant
-
-## 🚀 Installation
-
-### Home Assistant Add-on (Recommended)
-
-#### Via HACS (Recommended)
-1. Open HACS in your Home Assistant instance
-2. Go to "Integrations" → "..." → "Custom repositories"
-3. Add repository URL: `https://github.com/openchargehub/ocpp-proxy`
-4. Select category: "Add-on"
-5. Click "Add"
-6. Search for "OCPP Proxy" in HACS
-7. Install the add-on
-8. Configure options via the add-on UI
-9. Start the add-on
-
-#### Manual Installation
-1. Copy this repository into your Home Assistant add-ons directory
-2. Configure options via the add-on UI
-3. Start the add-on
-
-### Standalone (Docker Compose)
-```yaml
-version: '3'
-services:
-  ocpp_proxy:
-    build: .
-    environment:
-      - HA_URL=http://homeassistant.local:8123
-      - HA_TOKEN=YOUR_LONG_LIVED_ACCESS_TOKEN
-    ports:
-      - '9000:9000'
-    volumes:
-      - ./config:/data
+```
+Wallbox ──wss──► OCPP Sniffer ──wss──► Wattify (CPO)
+                     │
+                     └──► /charger_info  (idTag for EVCC)
 ```
 
-### Development Setup
-```bash
-# Install dependencies
-pip install -r requirements.txt
+1. Wallbox connects to the proxy instead of directly to Wattify.
+2. Every OCPP message is forwarded to Wattify unchanged.
+3. Every Wattify response is relayed back to the charger unchanged.
+4. Wattify remains in full control of authorization and billing.
+5. The proxy sniffs `Authorize` and `StartTransaction` messages and records the `idTag`.
+6. EVCC polls `/charger_info` to read the last `idTag` and identify the vehicle.
 
-# Run tests
-make test
+## Installation
 
-# Start development server
-make run
-```
+### Home Assistant Add-on
 
-## ⚙️ Configuration
+1. In HA: **Settings > Add-ons > Add-on Store > Repositories**
+2. Add: `https://github.com/nickveenhof/ocpp-proxy`
+3. Install **OCPP Sniffer**
+4. Configure (see below)
+5. Start
 
-### Basic Configuration (YAML)
+## Configuration
+
 ```yaml
-# OCPP Protocol Settings
-ocpp_version: "1.6"              # Default version (1.6 or 2.0.1)
-auto_detect_ocpp_version: true   # Auto-detect from connection
-
-# Sharing Control
-allow_shared_charging: true
-preferred_provider: "energy_provider_1"
-rate_limit_seconds: 10
-
-# Home Assistant Integration
-presence_sensor: "binary_sensor.someone_home"
-override_input_boolean: "input_boolean.charger_override"
-
-# Provider Management
-allowed_providers: ["provider1", "provider2"]  # Optional allowlist
-blocked_providers: ["spammer"]                 # Optional blocklist
-
-# OCPP Services (Outbound Connections)
 ocpp_services:
-  - id: "energy_provider"
-    url: "ws://provider.com/ocpp"
-    version: "1.6"
-    auth_type: "basic"
-    username: "user"
-    password: "pass"
-    enabled: true
-  
-  - id: "fleet_service"
-    url: "wss://fleet.com/ocpp/cp001"
-    version: "2.0.1"
-    auth_type: "token"
-    token: "bearer_token_here"
+  - id: "wattify"
+    url: "wss://cpo.wattify.be/ocpp/YOUR_SERIAL"
+    auth_type: "none"
     enabled: true
 ```
 
-### Version Detection
-The proxy automatically detects OCPP versions through:
-- WebSocket subprotocol (`ocpp1.6`, `ocpp2.0.1`)
-- HTTP headers (`Sec-WebSocket-Protocol`, `X-OCPP-Version`)
-- URL query parameters (`?version=2.0.1`)
-- URL path patterns (`/charger/v2.0.1`)
+All other settings are optional and unused in transparent proxy mode.
 
-## 🔌 API Endpoints
+## Charger setup
 
-### WebSocket Endpoints
-- **`/charger`** - EV charger connection (CSMS role)
-  - Auto-detects OCPP version
-  - Supports query parameters: `?version=2.0.1`
-- **`/backend?id=backend_id`** - Backend service connections
-  - Custom protocol for control requests and event subscriptions
+Point your charger's OCPP URL to the proxy instead of your CPO:
 
-### REST API
-- **`GET /`** - Web interface with endpoint documentation
-- **`GET /sessions`** - Charging sessions as JSON
-- **`GET /sessions.csv`** - Charging sessions as CSV
-- **`GET /status`** - Backend status and current control owner
-- **`POST /override`** - Manual control override
+| Setting | Value |
+|---|---|
+| OCPP URL | `wss://ocpp.yourdomain.com/charger` |
+| Identity | your charger serial number |
+| Password | (empty) |
 
-## 🏗️ Architecture
+## REST API
 
-### Core Components
+| Endpoint | Description |
+|---|---|
+| `GET /charger_info` | Last captured idTag and charger state. Poll this from EVCC. |
+| `GET /status` | Upstream URL and charger connection state |
+| `GET /sessions` | Completed sessions with idTag (JSON) |
+| `GET /sessions.csv` | Completed sessions (CSV) |
 
-```
-src/ocpp_proxy/
-├── main.py                    # Application entry point & HTTP server
-├── charge_point_base.py       # Abstract base for version-agnostic interface
-├── charge_point_v16.py        # OCPP 1.6 implementation
-├── charge_point_v201.py       # OCPP 2.0.1 implementation
-├── charge_point_factory.py    # Version-specific instantiation
-├── backend_manager.py         # Multi-backend control arbitration
-├── ocpp_service_manager.py    # Outbound OCPP service connections
-├── config.py                  # Configuration management
-├── ha_bridge.py              # Home Assistant API integration
-└── logger.py                 # Session tracking & persistence
+### `/charger_info` response example
+
+```json
+{
+  "connected": true,
+  "vendor": "Wall Box Chargers",
+  "model": "PPR1-0-2-4",
+  "last_id_tag": "97BA7F51",
+  "last_status": "Preparing"
+}
 ```
 
-### Protocol Differences Handled
-- **OCPP 1.6**: `RemoteStartTransaction`, `StartTransaction`/`StopTransaction`
-- **OCPP 2.0.1**: `RequestStartTransaction`, `TransactionEvent` (Started/Ended)
-- Automatic message format conversion and enum handling
+## EVCC integration
 
-### Control Flow
-1. **Connection**: Charger connects → Version detected → Appropriate handler created
-2. **Registration**: Multiple backends subscribe to events and request control
-3. **Arbitration**: Smart control arbitration based on rules and preferences
-4. **Safety**: Automatic fault handling and user override capabilities
+In `evcc.yaml`, use `type: custom` and poll `/charger_info` for the idTag:
 
-## 🧪 Testing
+```yaml
+chargers:
+  - name: wallbox
+    type: custom
+    status:
+      source: homeassistant
+      entity: sensor.wallbox_evcc_status
+    enabled:
+      source: homeassistant
+      entity: sensor.wallbox_evcc_enabled
+    enable:
+      source: homeassistant
+      entity: switch.wallbox_pulsar_pro_sn_1305884_pause_resume
+    maxcurrent:
+      source: homeassistant
+      entity: number.wallbox_pulsar_pro_sn_1305884_maximum_charging_current
+    power:
+      source: homeassistant
+      entity: sensor.wallbox_charge_power_w
+    energy:
+      source: homeassistant
+      entity: sensor.wallbox_pulsar_pro_sn_1305884_added_energy
+    identify:
+      source: http
+      uri: http://192.168.1.126:9000/charger_info
+      jq: .last_id_tag
 
-```bash
-# Run all tests
-make test
-
-# Run specific test types
-make test-unit         # Unit tests only
-make test-integration  # Integration tests only
-make test-e2e         # End-to-end tests only
-
-# Coverage reporting
-make test-coverage     # Generate HTML coverage report
+vehicles:
+  - name: polestar4
+    type: polestar
+    identifiers:
+      - 97BA7F51
 ```
 
-Test coverage requirement: **85% minimum**
+## Architecture
 
-## 🔧 Development Commands
+This proxy does NOT act as a Central System. Wattify remains the Central System and handles all authorization and billing. The proxy is transparent to both sides.
 
-```bash
-# Development
-make run              # Start development server
-make clean           # Clean temporary files
+The only thing the proxy does beyond forwarding is:
+- Log `idTag` from `Authorize` and `StartTransaction` messages
+- Expose `idTag` via REST for EVCC vehicle identification
 
-# Testing
-make test            # Run full test suite
-make test-quick      # Quick unit tests only
+## License
 
-# Quality
-make lint            # Code linting (when configured)
-make format          # Code formatting (when configured)
-
-# Docker
-make docker-build    # Build Docker image
-make docker-run      # Run in container
-```
-
-## 📊 Use Cases
-
-### Primary Scenario
-Homeowner with EV charger wants to:
-- Allow energy providers to use spare capacity during off-peak rates
-- Let fleet services use charger for delivery vehicles during work hours
-- Provide public access through charging networks when on vacation
-- Maintain full control with Home Assistant automation
-
-### Example Integrations
-- **Energy Providers**: Smart charging during cheap electricity periods
-- **Fleet Management**: Scheduled charging for commercial vehicles  
-- **Charging Networks**: Revenue sharing through public access
-- **Home Automation**: Presence-based blocking and smart overrides
-
-## 🛡️ Safety Features
-
-- **Fault Handling**: Charger faults immediately revoke all backend control
-- **Conflict Prevention**: Only one backend can control charger simultaneously
-- **User Override**: Always possible via Home Assistant interface
-- **Rate Limiting**: Prevents spam requests from backends
-- **Provider Filtering**: Allowlist/blocklist support for security
-
-## 📈 Future Roadmap
-
-### OCPP 2.1 Support (2025 H2)
-- Bidirectional charging (V2G) support
-- Distributed Energy Resource (DER) control
-- Enhanced payment integration
-- Battery swapping support
-
-### Planned Features
-- Advanced pricing APIs
-- Multi-charger support
-- Enhanced authentication mechanisms
-- Real-time analytics dashboard
-
-## 📄 License
-
-Open source - check license file for details.
-
-## 🤝 Contributing
-
-Contributions welcome! Please:
-1. Run tests: `make test`
-2. Follow existing code style
-3. Add tests for new features
-4. Update documentation
-
-## 🔗 Links
-
-- [OCPP 1.6 Specification](https://openchargealliance.org/protocols/ocpp-16/)
-- [OCPP 2.0.1 Specification](https://openchargealliance.org/protocols/ocpp-201/)
-- [Home Assistant Add-on Development](https://developers.home-assistant.io/docs/add-ons/)
+MIT
