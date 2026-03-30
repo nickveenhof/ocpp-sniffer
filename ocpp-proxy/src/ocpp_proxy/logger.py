@@ -19,7 +19,8 @@ class EventLogger:
                 backend_id TEXT,
                 duration_s REAL,
                 energy_kwh REAL,
-                revenue REAL
+                revenue REAL,
+                id_tag TEXT
             )
         """
         )
@@ -27,20 +28,26 @@ class EventLogger:
         conn.close()
 
     def log_session(
-        self, backend_id: str, duration_s: float, energy_kwh: float, revenue: float
+        self,
+        backend_id: str,
+        duration_s: float,
+        energy_kwh: float,
+        revenue: float,
+        id_tag: str = "",
     ) -> None:
         """Persist a session record into SQLite."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO sessions (timestamp, backend_id, duration_s, energy_kwh, revenue) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO sessions (timestamp, backend_id, duration_s, energy_kwh, revenue, id_tag) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 datetime.datetime.now(datetime.UTC).isoformat(),
                 backend_id,
                 duration_s,
                 energy_kwh,
                 revenue,
+                id_tag,
             ),
         )
         conn.commit()
@@ -51,14 +58,14 @@ class EventLogger:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT timestamp, backend_id, duration_s, energy_kwh, revenue "
+            "SELECT timestamp, backend_id, duration_s, energy_kwh, revenue, id_tag "
             "FROM sessions ORDER BY timestamp"
         )
         rows = cursor.fetchall()
         conn.close()
 
         sessions = []
-        for ts, backend, dur, energy, rev in rows:
+        for ts, backend, dur, energy, rev, id_tag in rows:
             sessions.append(
                 {
                     "timestamp": ts,
@@ -66,6 +73,7 @@ class EventLogger:
                     "duration_s": dur,
                     "energy_kwh": energy,
                     "revenue": rev,
+                    "id_tag": id_tag or "",
                 }
             )
         return sessions

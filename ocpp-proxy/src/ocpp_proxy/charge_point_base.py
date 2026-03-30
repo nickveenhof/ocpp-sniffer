@@ -28,6 +28,11 @@ class ChargePointBase(ABC):
         # Track ongoing sessions: tx_id -> start info
         self._sessions: dict[int, dict[str, Any]] = {}
         self._tx_counter = 0
+        self.last_id_tag: str | None = None
+        self.charger_connected: bool = False
+        self.charger_vendor: str | None = None
+        self.charger_model: str | None = None
+        self.last_status: str | None = None
 
     @property
     @abstractmethod
@@ -82,7 +87,9 @@ class ChargePointBase(ABC):
             revenue = 0.0
             # Determine backend owner
             backend_id = getattr(self.manager, "_lock_owner", None) if self.manager else ""
-            self.event_logger.log_session(backend_id, duration, energy, revenue)
+            self.event_logger.log_session(
+                backend_id, duration, energy, revenue, id_tag=info.get("id_tag", "")
+            )
         return info
 
     async def _broadcast_event(self, event: dict[str, Any]) -> None:

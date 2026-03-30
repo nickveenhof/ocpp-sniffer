@@ -116,7 +116,32 @@ async def status_handler(request: web.Request) -> web.Response:
     """Get current control owner status and backend information."""
     backend_manager = request.app["backend_manager"]
     status = backend_manager.get_backend_status()
+    cp = request.app.get("charge_point")
+    if cp:
+        status["charger_connected"] = cp.charger_connected
+        status["charger_vendor"] = cp.charger_vendor
+        status["charger_model"] = cp.charger_model
+        status["last_id_tag"] = cp.last_id_tag
+        status["last_status"] = cp.last_status
+    else:
+        status["charger_connected"] = False
+        status["last_id_tag"] = None
     return web.json_response(status)
+
+
+async def charger_info_handler(request: web.Request) -> web.Response:
+    cp = request.app.get("charge_point")
+    if not cp:
+        return web.json_response({"connected": False, "id_tag": None})
+    return web.json_response(
+        {
+            "connected": cp.charger_connected,
+            "vendor": cp.charger_vendor,
+            "model": cp.charger_model,
+            "last_id_tag": cp.last_id_tag,
+            "last_status": cp.last_status,
+        }
+    )
 
 
 async def welcome_handler(_request: web.Request) -> web.Response:
@@ -242,6 +267,7 @@ async def init_app() -> web.Application:
             web.get("/sessions", sessions_json),
             web.get("/sessions.csv", sessions_csv),
             web.get("/status", status_handler),
+            web.get("/charger_info", charger_info_handler),
             web.post("/override", override_handler),
         ]
     )

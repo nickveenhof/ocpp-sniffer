@@ -70,13 +70,15 @@ class ChargePointV16(ChargePointBase, OCPPChargePoint):
         **kwargs: Any,
     ) -> call_result.BootNotification:
         """Handle BootNotification request from charger."""
+        self.charger_connected = True
+        self.charger_vendor = charge_point_vendor
+        self.charger_model = charge_point_model
         event = {
             "type": "boot",
             "vendor": charge_point_vendor,
             "model": charge_point_model,
         }
         await self._broadcast_event(event)
-        # Respond to charger
         return call_result.BootNotification(
             current_time=datetime.datetime.now(datetime.UTC).isoformat(),
             interval=10,
@@ -86,6 +88,7 @@ class ChargePointV16(ChargePointBase, OCPPChargePoint):
     @on("Authorize")  # type: ignore[misc]
     async def on_authorize(self, id_tag: str, **kwargs: Any) -> call_result.Authorize:
         _LOGGER.info("Authorize request for idTag=%s", id_tag)
+        self.last_id_tag = id_tag
         event = {"type": "authorize", "id_tag": id_tag}
         await self._broadcast_event(event)
         return call_result.Authorize(id_tag_info={"status": AuthorizationStatus.accepted})
@@ -103,6 +106,7 @@ class ChargePointV16(ChargePointBase, OCPPChargePoint):
         self, connector_id: int, error_code: str, status: str, **kwargs: Any
     ) -> call_result.StatusNotification:
         """Handle StatusNotification, broadcast and enforce safety on faults."""
+        self.last_status = status
         event = {
             "type": "status",
             "connector_id": connector_id,
@@ -141,10 +145,9 @@ class ChargePointV16(ChargePointBase, OCPPChargePoint):
     ) -> call_result.StartTransaction:
         """Handle transaction start: record session and broadcast."""
         # Assign a new transaction ID
+        self.last_id_tag = id_tag
         tx_id = self._get_next_transaction_id()
-        # Store session start info
         self._store_session(tx_id, connector_id, id_tag, timestamp, meter_start)
-        # Notify subscribers
         await self._broadcast_event(
             {
                 "type": "transaction_started",
