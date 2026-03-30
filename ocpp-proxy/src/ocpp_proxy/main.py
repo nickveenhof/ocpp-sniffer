@@ -53,6 +53,7 @@ async def log_all_requests(request, handler):
         request.headers.get("Sec-WebSocket-Protocol", ""),
         request.headers.get("User-Agent", ""),
     )
+    _LOGGER.info("Headers: %s", dict(request.headers))
     return await handler(request)
 
 
