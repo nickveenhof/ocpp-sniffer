@@ -16,15 +16,51 @@ from .ocpp_service_manager import OCPPServiceManager
 _LOGGER = logging.getLogger(__name__)
 
 
+class AioHTTPWSAdapter:
+    """Bridges aiohttp WebSocketResponse to the recv/send interface expected by the ocpp library."""
+
+    def __init__(self, ws):
+        self._ws = ws
+
+    async def send(self, message):
+        await self._ws.send_str(message)
+
+    async def recv(self):
+        msg = await self._ws.receive()
+        if msg.type == web.WSMsgType.TEXT:
+            return msg.data
+        if msg.type in (web.WSMsgType.CLOSE, web.WSMsgType.CLOSING, web.WSMsgType.CLOSED):
+            raise ConnectionError(f"WebSocket closed: {msg.type}")
+        if msg.type == web.WSMsgType.ERROR:
+            raise ConnectionError(f"WebSocket error: {self._ws.exception()}")
+        raise ConnectionError(f"Unexpected message type: {msg.type}")
+
+    async def close(self, code=None, reason=None):
+        await self._ws.close()
+
+
+@web.middleware
+async def log_all_requests(request, handler):
+    _LOGGER.info(
+        "HTTP %s %s from %s WS-Proto=%s",
+        request.method,
+        request.path_qs,
+        request.remote,
+        request.headers.get("Sec-WebSocket-Protocol", ""),
+    )
+    return await handler(request)
+
+
 async def charger_handler(request: web.Request) -> web.WebSocketResponse:
     """Handle WebSocket connection from the EV charger (CSMS role)."""
-    ws = web.WebSocketResponse()
+    ws = web.WebSocketResponse(protocols=("ocpp1.6", "ocpp2.0.1"))
     await ws.prepare(request)
 
+    adapted_ws = AioHTTPWSAdapter(ws)
     config = request.app["config"]
     cp = ChargePointFactory.create_charge_point(
         "CP-1",
-        ws,
+        adapted_ws,
         version=config.ocpp_version,
         manager=request.app["backend_manager"],
         ha_bridge=request.app["ha_bridge"],
@@ -185,7 +221,7 @@ async def init_app() -> web.Application:
     # Initialize OCPP service manager
     ocpp_service_manager = OCPPServiceManager(config)
 
-    app = web.Application()
+    app = web.Application(middlewares=[log_all_requests])
     app["config"] = config
     app["backend_manager"] = BackendManager(config, ha, ocpp_service_manager)
     app["ha_bridge"] = ha

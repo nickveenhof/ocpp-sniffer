@@ -1,6 +1,9 @@
 import asyncio
 import datetime
+import logging
 from typing import Any
+
+_LOGGER = logging.getLogger(__name__)
 
 from ocpp.routing import on
 from ocpp.v16 import ChargePoint as OCPPChargePoint
@@ -32,14 +35,14 @@ class ChargePointV16(ChargePointBase, OCPPChargePoint):
         return "1.6"
 
     async def start(self) -> None:
-        """Initiate the BootNotification sequence and handle incoming messages."""
-        # Send BootNotification to charger (as charge point)
-        await self.call_boot_notification(
-            charge_point_model="EVProxy", charge_point_vendor="OCPPProxy"
-        )
-        # Keep the listener alive
+        """Listen for incoming OCPP messages from the charger (CSMS role)."""
+        import logging
+
+        _log = logging.getLogger(__name__)
         while True:
-            await asyncio.sleep(1)
+            message = await self._connection.recv()
+            _log.info("OCPP RX: %s", message)
+            await self.route_message(message)
 
     async def send_remote_start_transaction(self, connector_id: int, id_tag: str) -> bool:
         """Send RemoteStartTransaction command to charger."""
@@ -79,6 +82,13 @@ class ChargePointV16(ChargePointBase, OCPPChargePoint):
             interval=10,
             status=RegistrationStatus.accepted,
         )
+
+    @on("Authorize")  # type: ignore[misc]
+    async def on_authorize(self, id_tag: str, **kwargs: Any) -> call_result.Authorize:
+        _LOGGER.info("Authorize request for idTag=%s", id_tag)
+        event = {"type": "authorize", "id_tag": id_tag}
+        await self._broadcast_event(event)
+        return call_result.Authorize(id_tag_info={"status": AuthorizationStatus.accepted})
 
     @on("Heartbeat")  # type: ignore[misc]
     async def on_heartbeat(self) -> call_result.Heartbeat:
