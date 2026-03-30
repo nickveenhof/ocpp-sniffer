@@ -1,8 +1,8 @@
 name: OCPP Sniffer
-version: '0.1.7'
+version: '0.1.8'
 slug: ocpp-proxy
 description: 'Transparent OCPP proxy that forwards charger traffic to your CPO and captures RFID idTags for EVCC vehicle identification'
-homeassistant_api: true
+homeassistant_api: false
 init: false
 arch:
   - amd64
@@ -12,29 +12,6 @@ arch:
 startup: services
 boot: auto
 options:
-  allow_shared_charging: true
-  preferred_provider: ''
-  blocked_providers: []
-  allowed_providers: []
-  presence_sensor: ''
-  override_input_boolean: ''
-  rate_limit_seconds: 10
-  ocpp_services: []
+  upstream_url: ''
 schema:
-  allow_shared_charging: bool
-  preferred_provider: str?
-  blocked_providers:
-    - str
-  allowed_providers:
-    - str
-  presence_sensor: str?
-  override_input_boolean: str?
-  rate_limit_seconds: int(1,300)
-  ocpp_services:
-    - id: str
-      url: str
-      auth_type: list(none|basic|token)?
-      username: str?
-      password: str?
-      token: str?
-      enabled: bool?
+  upstream_url: str
