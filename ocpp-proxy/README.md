@@ -6,8 +6,8 @@ capturing RFID idTags and meter values for use in evcc.
 
 ## Why does this exist?
 
-If you use **evcc** for solar charging and your charger is managed by a CPO like
-Wattify for billing, you face a problem:
+If you use **evcc** for solar charging and your charger is managed by a CPO
+(Charge Point Operator) for billing, you face a problem:
 
 - The CPO controls authorization via OCPP. Your charger only talks to the CPO.
 - evcc needs to know **who plugged in** (RFID tag) to select the right vehicle and
@@ -21,18 +21,15 @@ OCPP Sniffer solves this by sitting transparently in the middle.
 ```
 Without sniffer:
 
-  Wallbox ──wss──► Wattify (CPO)
-                      │
-                      └── billing, auth, scheduling
+  Wallbox ──wss──► Your CPO (billing, auth, scheduling)
 
   evcc ──HA API──► Wallbox  (no RFID, no meter data)
 
 
 With sniffer:
 
-  Wallbox ──wss──► OCPP Sniffer ──wss──► Wattify (CPO)
-                        │                    │
-                        │                    └── billing, auth, scheduling
+  Wallbox ──wss──► OCPP Sniffer ──wss──► Your CPO (billing, auth, scheduling)
+                        │
                         │
                         ├── /charger_info   → RFID tag, charger status
                         ├── /meter_values   → power, energy, L1/L2/L3
@@ -67,7 +64,7 @@ control of authorization and billing. The sniffer only reads and exposes data.
 ## Configuration
 
 ```yaml
-upstream_url: "wss://cpo.wattify.be/ocpp/YOUR_SERIAL"
+upstream_url: "wss://your-cpo-endpoint/ocpp/YOUR_CHARGER_ID"
 charger_password: "your-password"
 ```
 
@@ -88,15 +85,97 @@ Change your charger's OCPP URL to point to the sniffer instead of your CPO.
 
 The sniffer is publicly reachable via a Cloudflare Tunnel (see below).
 
-## Making the sniffer reachable
+## Making the sniffer reachable from the internet
 
-The charger needs a public WSS endpoint. Use a Cloudflare Tunnel:
+Your charger connects outbound to the CPO over WSS (WebSocket Secure). To
+intercept this, the sniffer must be reachable at a public HTTPS/WSS URL with a
+valid TLS certificate. A plain LAN IP does not work because the charger requires
+WSS and will reject self-signed certificates.
 
-1. Create a tunnel at [one.dash.cloudflare.com](https://one.dash.cloudflare.com)
-2. Install the Cloudflare add-on in HA
-3. Set `tunnel_token` in the Cloudflare add-on config
-4. Add public hostname: `ocpp.yourdomain.com` → `http://172.30.33.X:9000`
-   (find the sniffer container IP with `docker inspect addon_..._ocpp-proxy`)
+The recommended approach is a **Cloudflare Tunnel**. It gives you a public WSS
+endpoint with a valid cert at no cost, without opening any ports in your router.
+
+```
+Wallbox ──wss──► ocpp.yourdomain.com  (Cloudflare edge)
+                        │
+                   Cloudflare Tunnel
+                        │
+                   HA host (LAN)
+                        │
+                  OCPP Sniffer :9000
+```
+
+### Step 1: Get a domain into Cloudflare
+
+Your domain must be added to Cloudflare (free plan works). Either:
+- Transfer nameservers of your existing domain to Cloudflare, or
+- Register a new domain through Cloudflare
+
+If your domain is at another registrar (e.g. TransIP), change the nameservers
+there to the Cloudflare nameservers shown during setup. Disable DNSSEC at the
+registrar first, then re-enable it in Cloudflare after the domain is active.
+
+### Step 2: Create a Cloudflare Tunnel
+
+1. Go to [one.dash.cloudflare.com](https://one.dash.cloudflare.com) (Zero Trust)
+2. Choose a free plan if prompted
+3. **Networks > Tunnels > Create a tunnel**
+4. Select **Cloudflared** as connector. Name it `home-assistant`. Click **Save**.
+5. Copy the tunnel token (starts with `eyJ...`). You need this in Step 3.
+6. Click **Next** then **Done**.
+
+### Step 3: Install the Cloudflared add-on in HA
+
+1. **Settings > Add-ons > Add-on Store > ⋮ > Repositories**
+2. Add: `https://github.com/homeassistant-apps/repository`
+3. Install **Cloudflared**
+4. In the add-on **Configuration** tab, set only:
+   ```yaml
+   tunnel_token: "eyJ...your token..."
+   ```
+5. Start the add-on. The Cloudflare dashboard should show the tunnel as **Connected**.
+
+### Step 4: Add a public hostname
+
+In Cloudflare Zero Trust > **Networks > Tunnels > home-assistant > Configure >
+Public Hostname > Add**:
+
+| Field | Value |
+|---|---|
+| Subdomain | `ocpp` |
+| Domain | `yourdomain.com` |
+| Type | `HTTP` |
+| URL | `172.30.33.X:9000` (sniffer container IP, see below) |
+
+To find the sniffer container IP, SSH into your HA host and run:
+```bash
+docker inspect addon_XXXXX_ocpp-proxy \
+  --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'
+```
+
+Save. The tunnel now routes `wss://ocpp.yourdomain.com/*` to the sniffer.
+
+### Step 5: Point your charger at the sniffer
+
+In your charger's OCPP settings:
+
+| Setting | Value |
+|---|---|
+| OCPP URL | `wss://ocpp.yourdomain.com/charger` |
+| Identity | your charger serial number |
+| Password | your `charger_password` (same as sniffer config) |
+
+The charger will now connect to the sniffer, which forwards everything to your CPO.
+
+### Security note
+
+The charger WebSocket path (`/charger/*`) is exempt from the password check at the
+Cloudflare level. Security is provided by the `charger_password` OCPP Basic Auth
+field: the sniffer rejects connections with a wrong or missing password.
+
+The REST API endpoints (`/charger_info`, `/meter_values`, etc.) are only on the
+LAN. evcc polls them directly from your local network. They are not exposed through
+the Cloudflare tunnel.
 
 ## REST API
 

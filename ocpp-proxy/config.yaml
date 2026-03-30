@@ -1,5 +1,5 @@
 name: OCPP Sniffer
-version: '0.2.6'
+version: '0.2.7'
 slug: ocpp-proxy
 description: 'Transparent OCPP proxy that forwards charger traffic to your CPO and captures RFID idTags for EVCC vehicle identification'
 homeassistant_api: false
