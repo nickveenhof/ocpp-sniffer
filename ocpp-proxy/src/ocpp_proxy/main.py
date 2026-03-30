@@ -263,6 +263,7 @@ async def init_app() -> web.Application:
         [
             web.get("/", welcome_handler),
             web.get("/charger", charger_handler),
+            web.get("/charger/{charger_id}", charger_handler),
             web.get("/backend", backend_handler),
             web.get("/sessions", sessions_json),
             web.get("/sessions.csv", sessions_csv),
