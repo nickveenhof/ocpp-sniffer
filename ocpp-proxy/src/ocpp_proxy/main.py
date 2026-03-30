@@ -60,14 +60,21 @@ def _sniff(raw: str) -> None:
         pass
 
 
+async def _connect_upstream(url: str):
+    return await websockets.connect(
+        url,
+        subprotocols=["ocpp1.6"],
+        ping_interval=None,
+        ping_timeout=None,
+    )
+
+
 async def charger_handler(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse(protocols=("ocpp1.6", "ocpp2.0.1"))
     await ws.prepare(request)
 
     config = request.app["config"]
-    upstream_url = None
-    if config.ocpp_services:
-        upstream_url = config.ocpp_services[0].get("url")
+    upstream_url = config.ocpp_services[0].get("url") if config.ocpp_services else None
 
     _charger_info["connected"] = True
     _LOGGER.info("Charger connected. Upstream: %s", upstream_url or "none")
@@ -75,15 +82,12 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
     upstream_ws = None
     if upstream_url:
         try:
-            upstream_ws = await websockets.connect(
-                upstream_url,
-                subprotocols=["ocpp1.6"],
-                ping_interval=30,
-                ping_timeout=10,
-            )
+            upstream_ws = await _connect_upstream(upstream_url)
             _LOGGER.info("Connected to upstream %s", upstream_url)
         except Exception:
             _LOGGER.exception("Failed to connect to upstream")
+
+    pending_charger_msgs: asyncio.Queue = asyncio.Queue()
 
     async def charger_to_upstream():
         async for msg in ws:
@@ -91,17 +95,32 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
                 break
             _LOGGER.info("CHARGER -> UPSTREAM: %s", msg.data)
             _sniff(msg.data)
-            if upstream_ws:
-                try:
-                    await upstream_ws.send(msg.data)
-                except Exception:
-                    _LOGGER.exception("Failed to send to upstream")
+            await pending_charger_msgs.put(msg.data)
 
-    async def upstream_to_charger():
-        if not upstream_ws:
-            return
+    async def upstream_relay():
+        nonlocal upstream_ws
+        while True:
+            raw = await pending_charger_msgs.get()
+            if raw is None:
+                break
+            if not upstream_ws or upstream_ws.state.name not in ("OPEN",):
+                if upstream_url:
+                    try:
+                        _LOGGER.info("Reconnecting to upstream %s", upstream_url)
+                        upstream_ws = await _connect_upstream(upstream_url)
+                        _LOGGER.info("Reconnected to upstream %s", upstream_url)
+                        asyncio.create_task(upstream_to_charger_loop(upstream_ws))
+                    except Exception:
+                        _LOGGER.exception("Failed to reconnect to upstream")
+                        continue
+            try:
+                await upstream_ws.send(raw)
+            except Exception:
+                _LOGGER.exception("Failed to send to upstream")
+
+    async def upstream_to_charger_loop(u_ws):
         try:
-            async for raw in upstream_ws:
+            async for raw in u_ws:
                 _LOGGER.info("UPSTREAM -> CHARGER: %s", raw)
                 try:
                     await ws.send_str(raw)
@@ -112,11 +131,14 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
             _LOGGER.info("Upstream connection closed")
 
     try:
-        await asyncio.gather(charger_to_upstream(), upstream_to_charger())
+        if upstream_ws:
+            asyncio.create_task(upstream_to_charger_loop(upstream_ws))
+        await asyncio.gather(charger_to_upstream(), upstream_relay())
     except Exception:
         _LOGGER.exception("Proxy error")
     finally:
         _charger_info["connected"] = False
+        await pending_charger_msgs.put(None)
         if upstream_ws:
             await upstream_ws.close()
         await ws.close(code=WSCloseCode.GOING_AWAY)
