@@ -58,6 +58,7 @@ _auto_throttle: bool = True
 _min_current: int = 6
 _charging_enabled: bool = False
 _max_current_amps: int = 6
+_pending_start_transaction_ids: set = set()
 
 _STATE_FILE = os.getenv("STATE_FILE", "/data/sniffer_state.json")
 
@@ -137,6 +138,18 @@ def _sniff(raw: str) -> str:
             if msg_id in _pending_responses:
                 _pending_responses[msg_id]["response"] = msg
                 _pending_responses[msg_id]["event"].set()
+            if msg_id in _pending_start_transaction_ids and len(msg) > 2:
+                transaction_id = (
+                    msg[2].get("transactionId") if isinstance(msg[2], dict) else None
+                )
+                if transaction_id:
+                    _last_session["transaction_id"] = transaction_id
+                    _LOGGER.info(
+                        "Captured transactionId=%s from StartTransaction response",
+                        transaction_id,
+                    )
+                    _save_state()
+                _pending_start_transaction_ids.discard(msg_id)
             return ""
 
         if action in ("Authorize", "StartTransaction"):
@@ -146,12 +159,15 @@ def _sniff(raw: str) -> str:
                 _LOGGER.info("Captured idTag=%s from %s", id_tag, action)
                 _save_state()
             if action == "StartTransaction":
+                msg_id = msg[1]
+                _pending_start_transaction_ids.add(msg_id)
                 _last_session["id_tag"] = id_tag
                 _last_session["start_time"] = payload.get("timestamp")
                 _last_session["meter_start_wh"] = payload.get("meterStart")
                 _last_session["stop_time"] = None
                 _last_session["stop_reason"] = None
                 _last_session["energy_wh"] = None
+                _last_session["transaction_id"] = 0
                 _save_state()
                 return "start"
 
