@@ -77,12 +77,12 @@ async def log_all_requests(request, handler):
     return await handler(request)
 
 
-def _sniff(raw: str) -> bool:
-    """Sniff OCPP messages. Returns True if StartTransaction detected."""
+def _sniff(raw: str) -> str:
+    """Sniff OCPP messages. Returns 'start' for StartTransaction, 'charging' for StatusNotification:Charging, '' otherwise."""
     try:
         msg = json.loads(raw)
         if not isinstance(msg, list) or len(msg) < 3:
-            return False
+            return ""
         msg_type = msg[0]
         action = msg[2] if len(msg) > 2 else ""
         payload = msg[3] if len(msg) > 3 else {}
@@ -92,7 +92,7 @@ def _sniff(raw: str) -> bool:
             if msg_id in _pending_responses:
                 _pending_responses[msg_id]["response"] = msg
                 _pending_responses[msg_id]["event"].set()
-            return False
+            return ""
 
         if action in ("Authorize", "StartTransaction"):
             id_tag = payload.get("idTag") or payload.get("id_tag")
@@ -106,7 +106,7 @@ def _sniff(raw: str) -> bool:
                 _last_session["stop_time"] = None
                 _last_session["stop_reason"] = None
                 _last_session["energy_wh"] = None
-                return True
+                return "start"
 
         if action == "BootNotification":
             _charger_info["vendor"] = payload.get("chargePointVendor")
@@ -127,6 +127,8 @@ def _sniff(raw: str) -> bool:
                 "Faulted": "F",
                 "Unavailable": "A",
             }.get(ocpp_status, "A")
+            if ocpp_status == "Charging" and not _charging_enabled:
+                return "charging"
 
         if action == "StopTransaction":
             meter_stop = payload.get("meterStop")
@@ -189,9 +191,9 @@ def _sniff(raw: str) -> bool:
                         _meter_values["voltage_l2"] = float(value)
                     elif measurand == "Voltage" and phase == "L3-N":
                         _meter_values["voltage_l3"] = float(value)
-        return False
+        return ""
     except Exception:
-        return False
+        return ""
 
 
 async def _connect_upstream(url: str):
@@ -273,8 +275,8 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
             if msg.type != web.WSMsgType.TEXT:
                 break
             _LOGGER.info("CHARGER -> UPSTREAM: %s", msg.data)
-            is_start = _sniff(msg.data)
-            if is_start and _auto_throttle:
+            sniff_result = _sniff(msg.data)
+            if sniff_result in ("start", "charging") and _auto_throttle:
                 asyncio.create_task(throttle_to_zero())
             await pending_charger_msgs.put(msg.data)
 
