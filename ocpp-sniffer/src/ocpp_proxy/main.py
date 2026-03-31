@@ -56,6 +56,8 @@ _active_charger_ws = None
 _pending_responses: dict = {}
 _auto_throttle: bool = True
 _min_current: int = 6
+_charging_enabled: bool = False
+_max_current_amps: int = 6
 
 
 @web.middleware
@@ -132,8 +134,14 @@ def _sniff(raw: str) -> bool:
             _last_session["meter_stop_wh"] = meter_stop
             _last_session["stop_reason"] = payload.get("reason", "Unknown")
             if _last_session["meter_start_wh"] is not None and meter_stop is not None:
-                _last_session["energy_wh"] = meter_stop - _last_session["meter_start_wh"]
-            id_tag = payload.get("idTag") or payload.get("id_tag") or _last_session.get("id_tag")
+                _last_session["energy_wh"] = (
+                    meter_stop - _last_session["meter_start_wh"]
+                )
+            id_tag = (
+                payload.get("idTag")
+                or payload.get("id_tag")
+                or _last_session.get("id_tag")
+            )
             _last_session["id_tag"] = id_tag
             _LOGGER.info(
                 "StopTransaction: idTag=%s energy=%s Wh reason=%s",
@@ -210,7 +218,9 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
         else:
             provided_password = ""
         if provided_password != config.charger_password:
-            _LOGGER.warning("Charger connection rejected: wrong password from %s", request.remote)
+            _LOGGER.warning(
+                "Charger connection rejected: wrong password from %s", request.remote
+            )
             return web.Response(status=401, text="Unauthorized")
 
     ws = web.WebSocketResponse(protocols=("ocpp1.6", "ocpp2.0.1"))
@@ -233,7 +243,9 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
     pending_charger_msgs: asyncio.Queue = asyncio.Queue()
 
     async def throttle_to_zero():
+        global _charging_enabled
         await asyncio.sleep(1)
+        _charging_enabled = False
         try:
             _LOGGER.info("AUTO-THROTTLE: setting current to 0A")
             await _send_to_charger(
@@ -357,12 +369,13 @@ async def command_handler(request: web.Request) -> web.Response:
 
 
 async def enable_handler(request: web.Request) -> web.Response:
+    global _charging_enabled
     enable = request.match_info.get("enable", "true").lower() == "true"
     if not _active_charger_ws:
         return web.json_response({"error": "no charger connected"}, status=503)
     try:
-        min_current = request.app["config"].min_current
-        limit = min_current if enable else 0
+        _charging_enabled = enable
+        limit = _max_current_amps if enable else 0
         payload = {
             "connectorId": 1,
             "csChargingProfiles": {
@@ -392,12 +405,24 @@ async def enable_handler(request: web.Request) -> web.Response:
 
 
 async def maxcurrent_handler(request: web.Request) -> web.Response:
+    global _max_current_amps
     try:
         amps = int(request.match_info["amps"])
     except (KeyError, ValueError):
         return web.json_response({"error": "amps required"}, status=400)
+    _max_current_amps = amps
     if not _active_charger_ws:
         return web.json_response({"error": "no charger connected"}, status=503)
+    if not _charging_enabled:
+        _LOGGER.info("maxcurrent=%dA stored but not sent (charging paused)", amps)
+        return web.json_response(
+            {
+                "action": "SetChargingProfile",
+                "amps": amps,
+                "sent": False,
+                "reason": "paused",
+            }
+        )
     try:
         payload = {
             "connectorId": 1,
@@ -414,7 +439,12 @@ async def maxcurrent_handler(request: web.Request) -> web.Response:
         }
         response = await _send_to_charger("SetChargingProfile", payload)
         return web.json_response(
-            {"action": "SetChargingProfile", "amps": amps, "response": response}
+            {
+                "action": "SetChargingProfile",
+                "amps": amps,
+                "sent": True,
+                "response": response,
+            }
         )
     except asyncio.TimeoutError:
         return web.json_response({"error": "charger did not respond"}, status=504)
@@ -431,7 +461,9 @@ async def sessions_csv(request: web.Request) -> web.Response:
     sessions = request.app["event_logger"].get_sessions()
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["timestamp", "backend_id", "duration_s", "energy_kwh", "revenue", "id_tag"])
+    writer.writerow(
+        ["timestamp", "backend_id", "duration_s", "energy_kwh", "revenue", "id_tag"]
+    )
     for s in sessions:
         writer.writerow(
             [
@@ -510,7 +542,9 @@ async def init_app() -> web.Application:
             "Auto-throttle enabled: charger set to 0A on StartTransaction, evcc controls via /enable"
         )
     if config.charger_password:
-        _LOGGER.info("Charger password configured: only authenticated chargers accepted")
+        _LOGGER.info(
+            "Charger password configured: only authenticated chargers accepted"
+        )
     else:
         _LOGGER.warning("No charger password set: any charger can connect")
 
