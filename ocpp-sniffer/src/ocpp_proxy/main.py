@@ -635,9 +635,88 @@ async def welcome_handler(_request: web.Request) -> web.Response:
   <li>POST /enable/false - pause charging (SetChargingProfile 0A)</li>
   <li>POST /maxcurrent/{amps} - set max current (SetChargingProfile)</li>
   <li>POST /command - raw OCPP command {"action":"...","payload":{...}}</li>
+  <li>POST /remote_start/{id_tag} - RemoteStartTransaction with given RFID tag</li>
+  <li>POST /remote_stop - RemoteStopTransaction for current session</li>
+  <li>POST /remote_restart/{id_tag} - stop current session + start new one with given RFID tag</li>
 </ul>
 </body></html>"""
     return web.Response(text=html, content_type="text/html")
+
+
+async def remote_start_handler(request: web.Request) -> web.Response:
+    id_tag = request.match_info.get("id_tag", "")
+    if not id_tag:
+        return web.json_response({"error": "id_tag required"}, status=400)
+    if not _active_charger_ws:
+        return web.json_response({"error": "no charger connected"}, status=503)
+    try:
+        payload = {"connectorId": 1, "idTag": id_tag}
+        response = await _send_to_charger("RemoteStartTransaction", payload)
+        _LOGGER.info("RemoteStartTransaction: idTag=%s response=%s", id_tag, response)
+        return web.json_response(
+            {"action": "RemoteStartTransaction", "id_tag": id_tag, "response": response}
+        )
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "charger did not respond"}, status=504)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def remote_stop_handler(request: web.Request) -> web.Response:
+    if not _active_charger_ws:
+        return web.json_response({"error": "no charger connected"}, status=503)
+    txn_id = _last_session.get("transaction_id", 0)
+    if not txn_id:
+        return web.json_response({"error": "no active transaction"}, status=400)
+    try:
+        response = await _send_to_charger(
+            "RemoteStopTransaction", {"transactionId": txn_id}
+        )
+        _LOGGER.info("RemoteStopTransaction: txn=%s response=%s", txn_id, response)
+        return web.json_response(
+            {
+                "action": "RemoteStopTransaction",
+                "transaction_id": txn_id,
+                "response": response,
+            }
+        )
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "charger did not respond"}, status=504)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def remote_restart_handler(request: web.Request) -> web.Response:
+    id_tag = request.match_info.get("id_tag", "")
+    if not id_tag:
+        return web.json_response({"error": "id_tag required"}, status=400)
+    if not _active_charger_ws:
+        return web.json_response({"error": "no charger connected"}, status=503)
+    results = {}
+    txn_id = _last_session.get("transaction_id", 0)
+    if txn_id:
+        try:
+            stop_resp = await _send_to_charger(
+                "RemoteStopTransaction", {"transactionId": txn_id}
+            )
+            results["stop"] = {"transaction_id": txn_id, "response": stop_resp}
+            _LOGGER.info("RemoteStopTransaction: txn=%s response=%s", txn_id, stop_resp)
+            await asyncio.sleep(2)
+        except asyncio.TimeoutError:
+            results["stop"] = {"error": "charger did not respond"}
+        except Exception as e:
+            results["stop"] = {"error": str(e)}
+    try:
+        start_resp = await _send_to_charger(
+            "RemoteStartTransaction", {"connectorId": 1, "idTag": id_tag}
+        )
+        results["start"] = {"id_tag": id_tag, "response": start_resp}
+        _LOGGER.info("RemoteStartTransaction: idTag=%s response=%s", id_tag, start_resp)
+    except asyncio.TimeoutError:
+        results["start"] = {"error": "charger did not respond"}
+    except Exception as e:
+        results["start"] = {"error": str(e)}
+    return web.json_response({"action": "RemoteRestart", "results": results})
 
 
 async def init_app() -> web.Application:
@@ -676,6 +755,9 @@ async def init_app() -> web.Application:
             web.post("/enable/{enable}", enable_handler),
             web.post("/maxcurrent/{amps}", maxcurrent_handler),
             web.post("/command", command_handler),
+            web.post("/remote_start/{id_tag}", remote_start_handler),
+            web.post("/remote_stop", remote_stop_handler),
+            web.post("/remote_restart/{id_tag}", remote_restart_handler),
         ]
     )
     return app

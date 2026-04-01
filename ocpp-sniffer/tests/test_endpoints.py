@@ -2,7 +2,13 @@ import json
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import AioHTTPTestCase, unittest_run_loop
-from ocpp_proxy.main import init_app, _charger_info, _meter_values, _last_session, _active_charger_ws
+from ocpp_proxy.main import (
+    init_app,
+    _charger_info,
+    _meter_values,
+    _last_session,
+    _active_charger_ws,
+)
 import ocpp_proxy.main as main_module
 
 
@@ -93,8 +99,9 @@ class TestCommandEndpointsNoCharger(AioHTTPTestCase):
     @unittest_run_loop
     async def test_command_without_charger_returns_503(self):
         main_module._active_charger_ws = None
-        resp = await self.client.request("POST", "/command",
-            json={"action": "GetConfiguration", "payload": {}})
+        resp = await self.client.request(
+            "POST", "/command", json={"action": "GetConfiguration", "payload": {}}
+        )
         assert resp.status == 503
 
     @unittest_run_loop
@@ -104,6 +111,36 @@ class TestCommandEndpointsNoCharger(AioHTTPTestCase):
 
     @unittest_run_loop
     async def test_command_invalid_json_returns_400(self):
-        resp = await self.client.request("POST", "/command", data="not json",
-            headers={"Content-Type": "application/json"})
+        resp = await self.client.request(
+            "POST",
+            "/command",
+            data="not json",
+            headers={"Content-Type": "application/json"},
+        )
         assert resp.status == 400
+
+    @unittest_run_loop
+    async def test_remote_start_without_charger_returns_503(self):
+        main_module._active_charger_ws = None
+        resp = await self.client.request("POST", "/remote_start/97BA7F51")
+        assert resp.status == 503
+
+    @unittest_run_loop
+    async def test_remote_stop_without_charger_returns_503(self):
+        main_module._active_charger_ws = None
+        resp = await self.client.request("POST", "/remote_stop")
+        assert resp.status == 503
+
+    @unittest_run_loop
+    async def test_remote_restart_without_charger_returns_503(self):
+        main_module._active_charger_ws = None
+        resp = await self.client.request("POST", "/remote_restart/97BA7F51")
+        assert resp.status == 503
+
+    @unittest_run_loop
+    async def test_remote_stop_without_transaction_returns_400(self):
+        main_module._active_charger_ws = "fake"
+        main_module._last_session["transaction_id"] = 0
+        resp = await self.client.request("POST", "/remote_stop")
+        assert resp.status == 400
+        main_module._active_charger_ws = None
