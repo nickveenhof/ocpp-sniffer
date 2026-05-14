@@ -535,10 +535,36 @@ async def enable_handler(request: web.Request) -> web.Response:
         return web.json_response({"error": "no charger connected"}, status=503)
 
     # Disable eco_mode before enabling charging (eco_mode blocks OCPP)
+    # Non-blocking: disable eco_mode in background, send SetChargingProfile immediately.
+    # The Wallbox may reject the first profile while eco_mode transitions,
+    # but EVCC will retry on the next cycle (30s).
     if enable and not _charging_enabled and _ECO_MODE_MANAGEMENT:
-        _LOGGER.info("Disabling eco_mode before enabling charging")
-        await set_eco_mode(False)
-        await asyncio.sleep(10)  # Give Wallbox time to transition from eco_mode
+        async def _disable_eco_then_enable():
+            _LOGGER.info("Disabling eco_mode before enabling charging")
+            await set_eco_mode(False)
+            await asyncio.sleep(10)
+            # Re-send the charging profile after eco_mode is off
+            if _charging_enabled:
+                limit = _max_current_amps
+                payload = {
+                    "connectorId": 1,
+                    "csChargingProfiles": {
+                        "chargingProfileId": 2,
+                        "stackLevel": 1,
+                        "chargingProfilePurpose": "TxProfile",
+                        "chargingProfileKind": "Absolute",
+                        "chargingSchedule": {
+                            "chargingRateUnit": "A",
+                            "chargingSchedulePeriod": [{"startPeriod": 0, "limit": limit}],
+                        },
+                    },
+                }
+                try:
+                    await _send_to_charger("SetChargingProfile", payload)
+                    _LOGGER.info("Re-sent SetChargingProfile %dA after eco_mode disable", limit)
+                except Exception as e:
+                    _LOGGER.error("Failed to re-send SetChargingProfile: %s", e)
+        asyncio.create_task(_disable_eco_then_enable())
 
     if enable == _charging_enabled:
         _LOGGER.info("enable=%s: no change, skipping SetChargingProfile", enable)
