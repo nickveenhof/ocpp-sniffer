@@ -551,6 +551,19 @@ async def enable_handler(request: web.Request) -> web.Response:
                 "reason": "no_change",
             }
         )
+    # Re-enable eco_mode when EVCC disables charging.
+    # Delay 10s so the 0A profile reaches the Wallbox first.
+    # If EVCC re-enables within 10s, the restore is cancelled.
+    if not enable and _charging_enabled and _ECO_MODE_MANAGEMENT:
+        async def _delayed_eco_restore_on_disable():
+            await asyncio.sleep(10)
+            if not _charging_enabled:
+                _LOGGER.info("Re-enabling eco_mode after EVCC disabled charging")
+                await set_eco_mode(True)
+            else:
+                _LOGGER.info("Skipping eco_mode restore: charging re-enabled")
+        asyncio.create_task(_delayed_eco_restore_on_disable())
+
     try:
         _charging_enabled = enable
         _save_state()
