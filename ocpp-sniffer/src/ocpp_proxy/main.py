@@ -8,11 +8,60 @@ import os
 import time
 import uuid
 
+import requests
 import websockets
 from aiohttp import WSCloseCode, web
 
 from .config import Config
 from .logger import EventLogger
+
+
+# --- Wallbox eco_mode toggle via Home Assistant API ---
+# eco_mode must be OFF for OCPP charging to work.
+# We disable it before EVCC starts charging, re-enable when session ends.
+# Uses the HA Supervisor API (SUPERVISOR_TOKEN) to toggle the select entity.
+
+_HA_URL = "http://supervisor/core/api"
+_HA_TOKEN = os.getenv("SUPERVISOR_TOKEN", "")
+_ECO_MODE_ENTITY = ""  # Set from config at startup
+_ECO_MODE_MANAGEMENT = True  # Set from config at startup
+_ECO_MODE_ENABLED = True  # Track current eco_mode state
+
+
+async def set_eco_mode(enabled: bool):
+    """Toggle Wallbox eco_mode via HA select entity."""
+    global _ECO_MODE_ENABLED
+    if not _ECO_MODE_MANAGEMENT or not _ECO_MODE_ENTITY:
+        return True
+    if enabled == _ECO_MODE_ENABLED:
+        _LOGGER.info("eco_mode already %s, skipping", "ON" if enabled else "OFF")
+        return True
+
+    option = "eco_mode" if enabled else "off"
+
+    def _call_ha():
+        resp = requests.post(
+            f"{_HA_URL}/services/select/select_option",
+            headers={
+                "Authorization": f"Bearer {_HA_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "entity_id": _ECO_MODE_ENTITY,
+                "option": option,
+            },
+            timeout=10,
+        )
+        return resp.status_code in (200, 201)
+
+    loop = asyncio.get_event_loop()
+    success = await loop.run_in_executor(None, _call_ha)
+    if success:
+        _ECO_MODE_ENABLED = enabled
+        _LOGGER.info("eco_mode set to %s via HA", "ON" if enabled else "OFF")
+    else:
+        _LOGGER.error("Failed to set eco_mode to %s via HA", "ON" if enabled else "OFF")
+    return success
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -202,6 +251,16 @@ def _sniff(raw: str) -> str:
                 _charging_enabled = False
                 _LOGGER.info("Session ended: reset charging_enabled to False")
                 _save_state()
+                # Re-enable eco_mode after session ends (delay to avoid rapid toggle)
+                async def _delayed_eco_restore():
+                    await asyncio.sleep(10)
+                    # Only restore if still not charging (EVCC might start again)
+                    if not _charging_enabled:
+                        _LOGGER.info("Re-enabling eco_mode after session end")
+                        await set_eco_mode(True)
+                    else:
+                        _LOGGER.info("Skipping eco_mode restore: charging re-enabled")
+                asyncio.create_task(_delayed_eco_restore())
             if ocpp_status == "Charging" and not _charging_enabled:
                 return "charging"
 
@@ -474,6 +533,13 @@ async def enable_handler(request: web.Request) -> web.Response:
     enable = request.match_info.get("enable", "true").lower() == "true"
     if not _active_charger_ws:
         return web.json_response({"error": "no charger connected"}, status=503)
+
+    # Disable eco_mode before enabling charging (eco_mode blocks OCPP)
+    if enable and not _charging_enabled and _ECO_MODE_MANAGEMENT:
+        _LOGGER.info("Disabling eco_mode before enabling charging")
+        await set_eco_mode(False)
+        await asyncio.sleep(10)  # Give Wallbox time to transition from eco_mode
+
     if enable == _charging_enabled:
         _LOGGER.info("enable=%s: no change, skipping SetChargingProfile", enable)
         return web.json_response(
@@ -727,14 +793,20 @@ async def remote_restart_handler(request: web.Request) -> web.Response:
 
 
 async def init_app() -> web.Application:
-    global _auto_throttle, _min_current
+    global _auto_throttle, _min_current, _ECO_MODE_ENTITY, _ECO_MODE_MANAGEMENT
     config = Config()
     _auto_throttle = config.auto_throttle
     _min_current = config.min_current
+    _ECO_MODE_ENTITY = config.eco_mode_entity
+    _ECO_MODE_MANAGEMENT = config.eco_mode_management
     _load_state()
     if _auto_throttle:
         _LOGGER.info(
             "Auto-throttle enabled: charger set to 0A on StartTransaction, evcc controls via /enable"
+        )
+    if _ECO_MODE_MANAGEMENT and _ECO_MODE_ENTITY:
+        _LOGGER.info(
+            "eco_mode management enabled: entity=%s", _ECO_MODE_ENTITY
         )
     if config.charger_password:
         _LOGGER.info(

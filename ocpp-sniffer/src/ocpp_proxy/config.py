@@ -39,3 +39,11 @@ class Config:
     @property
     def auto_throttle(self) -> bool:
         return bool(self._cfg.get("auto_throttle", True))
+
+    @property
+    def eco_mode_entity(self) -> str:
+        return str(self._cfg.get("eco_mode_entity", ""))
+
+    @property
+    def eco_mode_management(self) -> bool:
+        return bool(self._cfg.get("eco_mode_management", True))
