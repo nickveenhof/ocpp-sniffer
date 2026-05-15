@@ -1,4 +1,5 @@
 """Tests for Wallbox eco_mode management in the OCPP sniffer."""
+import asyncio
 import json
 import os
 import tempfile
@@ -6,6 +7,19 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 from ocpp_proxy.config import Config
 import ocpp_proxy.main as main_mod
+
+
+def _mock_get_state(option):
+    """Create a mock requests.get response that returns the expected state."""
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"state": option}
+    return mock_resp
+
+
+async def _instant_sleep(seconds):
+    """Replace asyncio.sleep with instant return in tests."""
+    pass
 
 
 class TestConfigEcoMode:
@@ -78,10 +92,12 @@ class TestSetEcoMode:
         main_mod._ECO_MODE_ENTITY = "select.wallbox_solar"
         main_mod._ECO_MODE_ENABLED = True
 
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
+        mock_post_resp = MagicMock()
+        mock_post_resp.status_code = 200
 
-        with patch("ocpp_proxy.main.requests.post", return_value=mock_resp) as mock_post:
+        with patch("ocpp_proxy.main.requests.post", return_value=mock_post_resp) as mock_post, \
+             patch("ocpp_proxy.main.requests.get", return_value=_mock_get_state("off")), \
+             patch("asyncio.sleep", _instant_sleep):
             result = await main_mod.set_eco_mode(False)
 
         assert result is True
@@ -97,10 +113,12 @@ class TestSetEcoMode:
         main_mod._ECO_MODE_ENTITY = "select.wallbox_solar"
         main_mod._ECO_MODE_ENABLED = False
 
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
+        mock_post_resp = MagicMock()
+        mock_post_resp.status_code = 200
 
-        with patch("ocpp_proxy.main.requests.post", return_value=mock_resp) as mock_post:
+        with patch("ocpp_proxy.main.requests.post", return_value=mock_post_resp) as mock_post, \
+             patch("ocpp_proxy.main.requests.get", return_value=_mock_get_state("eco_mode")), \
+             patch("asyncio.sleep", _instant_sleep):
             result = await main_mod.set_eco_mode(True)
 
         assert result is True
@@ -134,11 +152,38 @@ class TestSetEcoMode:
 
         with patch.dict(os.environ, {"SUPERVISOR_TOKEN": "test-token-123"}):
             main_mod._HA_TOKEN = os.getenv("SUPERVISOR_TOKEN", "")
-            with patch("ocpp_proxy.main.requests.post", return_value=mock_resp) as mock_post:
+            with patch("ocpp_proxy.main.requests.post", return_value=mock_resp) as mock_post, \
+                 patch("ocpp_proxy.main.requests.get", return_value=_mock_get_state("off")), \
+                 patch("asyncio.sleep", _instant_sleep):
                 await main_mod.set_eco_mode(False)
 
         call_kwargs = mock_post.call_args
         assert "Bearer test-token-123" in call_kwargs[1]["headers"]["Authorization"]
+
+    @pytest.mark.asyncio
+    async def test_verification_retries_on_mismatch(self):
+        """If first verify fails, retry and succeed."""
+        main_mod._ECO_MODE_MANAGEMENT = True
+        main_mod._ECO_MODE_ENTITY = "select.test"
+        main_mod._ECO_MODE_ENABLED = True
+
+        mock_post_resp = MagicMock()
+        mock_post_resp.status_code = 200
+
+        # First GET returns wrong state, second returns correct
+        wrong_state = MagicMock()
+        wrong_state.status_code = 200
+        wrong_state.json.return_value = {"state": "eco_mode"}
+
+        right_state = _mock_get_state("off")
+
+        with patch("ocpp_proxy.main.requests.post", return_value=mock_post_resp), \
+             patch("ocpp_proxy.main.requests.get", side_effect=[wrong_state, right_state]), \
+             patch("asyncio.sleep", _instant_sleep):
+            result = await main_mod.set_eco_mode(False)
+
+        assert result is True
+        assert main_mod._ECO_MODE_ENABLED is False
 
 
 class TestSniffEcoModeIntegration:

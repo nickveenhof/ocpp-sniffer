@@ -28,8 +28,26 @@ _ECO_MODE_MANAGEMENT = True  # Set from config at startup
 _ECO_MODE_ENABLED = True  # Track current eco_mode state
 
 
+def _get_eco_mode_state() -> str:
+    """Read the current eco_mode entity state from HA."""
+    try:
+        resp = requests.get(
+            f"{_HA_URL}/states/{_ECO_MODE_ENTITY}",
+            headers={
+                "Authorization": f"Bearer {_HA_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return resp.json().get("state", "unknown")
+    except Exception as e:
+        _LOGGER.error("Failed to read eco_mode state: %s", e)
+    return "unknown"
+
+
 async def set_eco_mode(enabled: bool):
-    """Toggle Wallbox eco_mode via HA select entity."""
+    """Toggle Wallbox eco_mode via HA select entity. Verifies the change took effect."""
     global _ECO_MODE_ENABLED
     if not _ECO_MODE_MANAGEMENT or not _ECO_MODE_ENTITY:
         return True
@@ -56,12 +74,36 @@ async def set_eco_mode(enabled: bool):
 
     loop = asyncio.get_event_loop()
     success = await loop.run_in_executor(None, _call_ha)
-    if success:
+    if not success:
+        _LOGGER.error("Failed to set eco_mode to %s via HA (API call failed)", "ON" if enabled else "OFF")
+        return False
+
+    _LOGGER.info("eco_mode set to %s via HA, waiting to verify...", "ON" if enabled else "OFF")
+
+    # Verify after a short delay that the state actually changed
+    await asyncio.sleep(5)
+    actual = await loop.run_in_executor(None, _get_eco_mode_state)
+    if actual == option:
         _ECO_MODE_ENABLED = enabled
-        _LOGGER.info("eco_mode set to %s via HA", "ON" if enabled else "OFF")
-    else:
-        _LOGGER.error("Failed to set eco_mode to %s via HA", "ON" if enabled else "OFF")
-    return success
+        _LOGGER.info("eco_mode VERIFIED: %s (entity state: %s)", "ON" if enabled else "OFF", actual)
+        return True
+
+    # Retry once
+    _LOGGER.warning("eco_mode NOT verified (expected %s, got %s). Retrying...", option, actual)
+    success = await loop.run_in_executor(None, _call_ha)
+    if not success:
+        _LOGGER.error("eco_mode retry failed (API call failed)")
+        return False
+
+    await asyncio.sleep(5)
+    actual = await loop.run_in_executor(None, _get_eco_mode_state)
+    if actual == option:
+        _ECO_MODE_ENABLED = enabled
+        _LOGGER.info("eco_mode VERIFIED on retry: %s (entity state: %s)", "ON" if enabled else "OFF", actual)
+        return True
+
+    _LOGGER.error("eco_mode FAILED after retry (expected %s, got %s)", option, actual)
+    return False
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -534,8 +576,11 @@ async def enable_handler(request: web.Request) -> web.Response:
     if enable and not _charging_enabled and _ECO_MODE_MANAGEMENT:
         async def _disable_eco_then_enable():
             _LOGGER.info("Disabling eco_mode before enabling charging")
-            await set_eco_mode(False)
-            await asyncio.sleep(10)
+            success = await set_eco_mode(False)
+            if not success:
+                _LOGGER.error("eco_mode disable failed, charging may not start")
+                return
+            await asyncio.sleep(5)  # Additional wait after verified disable
             # Re-send the charging profile after eco_mode is off
             if _charging_enabled:
                 limit = _max_current_amps
