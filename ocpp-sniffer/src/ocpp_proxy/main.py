@@ -42,7 +42,7 @@ def _get_eco_mode_state() -> str:
         if resp.status_code == 200:
             return resp.json().get("state", "unknown")
     except Exception as e:
-        _LOGGER.error("Failed to read eco_mode state: %s", e)
+        _LOGGER.error("[ECO] Failed to read eco_mode state: %s", e)
     return "unknown"
 
 
@@ -52,7 +52,7 @@ async def set_eco_mode(enabled: bool):
     if not _ECO_MODE_MANAGEMENT or not _ECO_MODE_ENTITY:
         return True
     if enabled == _ECO_MODE_ENABLED:
-        _LOGGER.info("eco_mode already %s, skipping", "ON" if enabled else "OFF")
+        _LOGGER.info("[ECO] eco_mode already %s, skipping", "ON" if enabled else "OFF")
         return True
 
     option = "eco_mode" if enabled else "off"
@@ -75,34 +75,34 @@ async def set_eco_mode(enabled: bool):
     loop = asyncio.get_event_loop()
     success = await loop.run_in_executor(None, _call_ha)
     if not success:
-        _LOGGER.error("Failed to set eco_mode to %s via HA (API call failed)", "ON" if enabled else "OFF")
+        _LOGGER.error("[ECO] Failed to set eco_mode to %s via HA (API call failed)", "ON" if enabled else "OFF")
         return False
 
-    _LOGGER.info("eco_mode set to %s via HA, waiting to verify...", "ON" if enabled else "OFF")
+    _LOGGER.info("[ECO] eco_mode set to %s via HA, waiting to verify...", "ON" if enabled else "OFF")
 
     # Verify after a short delay that the state actually changed
     await asyncio.sleep(5)
     actual = await loop.run_in_executor(None, _get_eco_mode_state)
     if actual == option:
         _ECO_MODE_ENABLED = enabled
-        _LOGGER.info("eco_mode VERIFIED: %s (entity state: %s)", "ON" if enabled else "OFF", actual)
+        _LOGGER.info("[ECO] eco_mode VERIFIED: %s (entity state: %s)", "ON" if enabled else "OFF", actual)
         return True
 
     # Retry once
-    _LOGGER.warning("eco_mode NOT verified (expected %s, got %s). Retrying...", option, actual)
+    _LOGGER.warning("[ECO] eco_mode NOT verified (expected %s, got %s). Retrying...", option, actual)
     success = await loop.run_in_executor(None, _call_ha)
     if not success:
-        _LOGGER.error("eco_mode retry failed (API call failed)")
+        _LOGGER.error("[ECO] eco_mode retry failed (API call failed)")
         return False
 
     await asyncio.sleep(5)
     actual = await loop.run_in_executor(None, _get_eco_mode_state)
     if actual == option:
         _ECO_MODE_ENABLED = enabled
-        _LOGGER.info("eco_mode VERIFIED on retry: %s (entity state: %s)", "ON" if enabled else "OFF", actual)
+        _LOGGER.info("[ECO] eco_mode VERIFIED on retry: %s (entity state: %s)", "ON" if enabled else "OFF", actual)
         return True
 
-    _LOGGER.error("eco_mode FAILED after retry (expected %s, got %s)", option, actual)
+    _LOGGER.error("[ECO] eco_mode FAILED after retry (expected %s, got %s)", option, actual)
     return False
 
 _LOGGER = logging.getLogger(__name__)
@@ -197,7 +197,7 @@ def _load_state():
         _LOGGER.exception("Failed to load state")
 
 
-# Paths that are polled every 10-30s by EVCC. Log at DEBUG to reduce noise.
+# Paths that are polled every 10-30s by EVCC.
 _QUIET_PATHS = {"/meter_values", "/charger_info"}
 
 
@@ -207,16 +207,20 @@ async def log_all_requests(request, handler):
         "CF-Connecting-IP",
         request.headers.get("X-Forwarded-For", request.remote),
     )
-    level = logging.DEBUG if request.path in _QUIET_PATHS else logging.INFO
-    _LOGGER.log(
-        level,
-        "HTTP %s %s from %s WS-Proto=%s UA=%s",
-        request.method,
-        request.path_qs,
-        real_ip,
-        request.headers.get("Sec-WebSocket-Protocol", ""),
-        request.headers.get("User-Agent", ""),
-    )
+    if request.path in _QUIET_PATHS:
+        _LOGGER.info(
+            "[POLL] %s %s",
+            request.method,
+            request.path,
+        )
+    else:
+        _LOGGER.info(
+            "[ACTION] HTTP %s %s from %s UA=%s",
+            request.method,
+            request.path_qs,
+            real_ip,
+            request.headers.get("User-Agent", ""),
+        )
     return await handler(request)
 
 
@@ -254,7 +258,7 @@ def _sniff(raw: str) -> str:
             id_tag = payload.get("idTag") or payload.get("id_tag")
             if id_tag:
                 _charger_info["last_id_tag"] = id_tag
-                _LOGGER.info("Captured idTag=%s from %s", id_tag, action)
+                _LOGGER.info("[SESSION] Captured idTag=%s from %s", id_tag, action)
                 _save_state()
             if action == "StartTransaction":
                 msg_id = msg[1]
@@ -297,7 +301,7 @@ def _sniff(raw: str) -> str:
             }.get(ocpp_status, "A")
             if ocpp_status == "Available" and _charging_enabled:
                 _charging_enabled = False
-                _LOGGER.info("Session ended: reset charging_enabled to False")
+                _LOGGER.info("[SESSION] Session ended: reset charging_enabled to False")
                 _save_state()
                 # eco_mode restore is handled by /enable/false handler, not here.
                 # StatusNotification "Available" can fire mid-session (e.g. replug)
@@ -408,13 +412,13 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
 
     _charger_info["connected"] = True
     _active_charger_ws = ws
-    _LOGGER.info("Charger connected. Upstream: %s", upstream_url or "none")
+    _LOGGER.info("[CONNECT] Charger connected. Upstream: %s", upstream_url or "none")
 
     upstream_ws = None
     if upstream_url:
         try:
             upstream_ws = await _connect_upstream(upstream_url)
-            _LOGGER.info("Connected to upstream %s", upstream_url)
+            _LOGGER.info("[CONNECT] Connected to upstream %s", upstream_url)
         except Exception:
             _LOGGER.exception("Failed to connect to upstream")
 
@@ -431,9 +435,9 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
             return
         _charging_enabled = False
         try:
-            _LOGGER.info("AUTO-THROTTLE: clearing all charging profiles")
+            _LOGGER.info("[THROTTLE]: clearing all charging profiles")
             await _send_to_charger("ClearChargingProfile", {"connectorId": 1})
-            _LOGGER.info("AUTO-THROTTLE: setting current to 0A")
+            _LOGGER.info("[THROTTLE]: setting current to 0A")
             await _send_to_charger(
                 "SetChargingProfile",
                 {
@@ -450,25 +454,55 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
                     },
                 },
             )
-            _LOGGER.info("AUTO-THROTTLE: charger set to 0A")
+            _LOGGER.info("[THROTTLE]: charger set to 0A")
         except Exception:
             _LOGGER.exception("AUTO-THROTTLE: failed to set 0A")
-
-    # OCPP actions that are routine polling noise (log at DEBUG)
-    _QUIET_OCPP = {"MeterValues", "Heartbeat"}
 
     async def charger_to_upstream():
         async for msg in ws:
             if msg.type != web.WSMsgType.TEXT:
                 break
-            # Reduce noise: MeterValues and Heartbeat at DEBUG, everything else at INFO
+            # Compact logging: MeterValues as one-line summary, actions as full JSON
             try:
                 parsed = json.loads(msg.data)
                 action = parsed[2] if len(parsed) > 2 and isinstance(parsed[2], str) else ""
             except (json.JSONDecodeError, IndexError):
                 action = ""
-            level = logging.DEBUG if action in _QUIET_OCPP else logging.INFO
-            _LOGGER.log(level, "CHARGER -> UPSTREAM: %s", msg.data)
+            if action == "MeterValues":
+                try:
+                    sv = parsed[3]["meterValue"][0]["sampledValue"]
+                    power = current_l1 = current_l2 = current_l3 = energy = 0.0
+                    for s in sv:
+                        m = s.get("measurand", "")
+                        v = float(s.get("value", 0))
+                        if m == "Power.Active.Import":
+                            power = v
+                        elif m == "Energy.Active.Import.Register":
+                            energy = v
+                        elif m == "Current.Import":
+                            phase = s.get("phase", "")
+                            if phase == "L1":
+                                current_l1 = v
+                            elif phase == "L2":
+                                current_l2 = v
+                            elif phase == "L3":
+                                current_l3 = v
+                    _LOGGER.info(
+                        "[METER] %.0fW [%.1f/%.1f/%.1f]A %.0fWh",
+                        power, current_l1, current_l2, current_l3, energy,
+                    )
+                except Exception:
+                    _LOGGER.info("[METER] %s", msg.data[:200])
+            elif action == "Heartbeat":
+                _LOGGER.info("[HEARTBEAT]")
+            elif action == "StatusNotification":
+                _LOGGER.info("[STATUS] %s", msg.data)
+            elif action in ("StartTransaction", "StopTransaction", "Authorize"):
+                _LOGGER.info("[SESSION] %s", msg.data)
+            elif action == "BootNotification":
+                _LOGGER.info("[BOOT] %s", msg.data)
+            else:
+                _LOGGER.info("[OCPP] %s", msg.data)
             sniff_result = _sniff(msg.data)
             if sniff_result in ("start", "charging") and _auto_throttle:
                 asyncio.create_task(throttle_to_zero())
@@ -513,14 +547,14 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
     async def upstream_to_charger_loop(u_ws):
         try:
             async for raw in u_ws:
-                # Most upstream responses are empty acks [3,"id",{}]. Log at DEBUG.
+                # Skip logging empty acks [3,"id",{}] entirely
                 try:
                     parsed = json.loads(raw)
                     is_empty_ack = (len(parsed) == 3 and parsed[0] == 3 and parsed[2] == {})
                 except (json.JSONDecodeError, IndexError):
                     is_empty_ack = False
-                level = logging.DEBUG if is_empty_ack else logging.INFO
-                _LOGGER.log(level, "UPSTREAM -> CHARGER: %s", raw)
+                if not is_empty_ack:
+                    _LOGGER.info("[UPSTREAM] %s", raw)
                 _sniff(raw)
                 try:
                     await ws.send_str(raw)
@@ -555,7 +589,7 @@ async def _send_to_charger(action: str, payload: dict, timeout: float = 10.0) ->
     _pending_responses[msg_id] = {"event": event, "response": None}
     try:
         await _active_charger_ws.send_str(msg)
-        _LOGGER.info("INJECTED -> CHARGER: %s", msg)
+        _LOGGER.info("[ACTION] INJECTED -> CHARGER: %s", msg)
         await asyncio.wait_for(event.wait(), timeout=timeout)
         return _pending_responses[msg_id]["response"]
     finally:
@@ -598,10 +632,10 @@ async def enable_handler(request: web.Request) -> web.Response:
     # persist _charging_enabled=True across restarts while eco_mode was restored.
     if enable and _ECO_MODE_ENABLED and _ECO_MODE_MANAGEMENT:
         async def _disable_eco_then_enable():
-            _LOGGER.info("Disabling eco_mode before enabling charging")
+            _LOGGER.info("[ECO] Disabling eco_mode before enabling charging")
             success = await set_eco_mode(False)
             if not success:
-                _LOGGER.error("eco_mode disable failed, charging may not start")
+                _LOGGER.error("[ECO] eco_mode disable failed, charging may not start")
                 return
             await asyncio.sleep(5)  # Additional wait after verified disable
             # Re-send the charging profile after eco_mode is off
@@ -622,13 +656,13 @@ async def enable_handler(request: web.Request) -> web.Response:
                 }
                 try:
                     await _send_to_charger("SetChargingProfile", payload)
-                    _LOGGER.info("Re-sent SetChargingProfile %dA after eco_mode disable", limit)
+                    _LOGGER.info("[ACTION] Re-sent SetChargingProfile %dA after eco_mode disable", limit)
                 except Exception as e:
-                    _LOGGER.error("Failed to re-send SetChargingProfile: %s", e)
+                    _LOGGER.error("[ACTION] Failed to re-send SetChargingProfile: %s", e)
         asyncio.create_task(_disable_eco_then_enable())
 
     if enable == _charging_enabled:
-        _LOGGER.info("enable=%s: no change, skipping SetChargingProfile", enable)
+        _LOGGER.info("[ACTION] enable=%s: no change, skipping SetChargingProfile", enable)
         return web.json_response(
             {
                 "action": "SetChargingProfile",
@@ -645,10 +679,10 @@ async def enable_handler(request: web.Request) -> web.Response:
         async def _delayed_eco_restore_on_disable():
             await asyncio.sleep(10)
             if not _charging_enabled:
-                _LOGGER.info("Re-enabling eco_mode after EVCC disabled charging")
+                _LOGGER.info("[ECO] Re-enabling eco_mode after EVCC disabled charging")
                 await set_eco_mode(True)
             else:
-                _LOGGER.info("Skipping eco_mode restore: charging re-enabled")
+                _LOGGER.info("[ECO] Skipping eco_mode restore: charging re-enabled")
         asyncio.create_task(_delayed_eco_restore_on_disable())
 
     try:
@@ -695,7 +729,7 @@ async def maxcurrent_handler(request: web.Request) -> web.Response:
     if not _active_charger_ws:
         return web.json_response({"error": "no charger connected"}, status=503)
     if not _charging_enabled:
-        _LOGGER.info("maxcurrent=%dA stored but not sent (charging paused)", amps)
+        _LOGGER.info("[ACTION] maxcurrent=%dA stored but not sent (charging paused)", amps)
         return web.json_response(
             {
                 "action": "SetChargingProfile",
