@@ -925,6 +925,8 @@ async def init_app() -> web.Application:
     else:
         _LOGGER.warning("No charger password set: any charger can connect")
 
+    # Disable aiohttp's built-in access logger (we handle logging in our middleware)
+    logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
     app = web.Application(middlewares=[log_all_requests])
     app["config"] = config
     app["event_logger"] = EventLogger(db_path=os.getenv("LOG_DB_PATH", "usage_log.db"))
