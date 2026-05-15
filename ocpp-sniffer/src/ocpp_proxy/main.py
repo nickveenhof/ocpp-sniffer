@@ -697,9 +697,9 @@ async def maxcurrent_handler(request: web.Request) -> web.Response:
         payload = {
             "connectorId": 1,
             "csChargingProfiles": {
-                "chargingProfileId": 1,
-                "stackLevel": 0,
-                "chargingProfilePurpose": "TxDefaultProfile",
+                "chargingProfileId": 2,
+                "stackLevel": 1,
+                "chargingProfilePurpose": "TxProfile",
                 "chargingProfileKind": "Absolute",
                 "chargingSchedule": {
                     "chargingRateUnit": "A",
