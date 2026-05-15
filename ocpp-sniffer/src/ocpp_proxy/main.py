@@ -197,13 +197,19 @@ def _load_state():
         _LOGGER.exception("Failed to load state")
 
 
+# Paths that are polled every 10-30s by EVCC. Log at DEBUG to reduce noise.
+_QUIET_PATHS = {"/meter_values", "/charger_info"}
+
+
 @web.middleware
 async def log_all_requests(request, handler):
     real_ip = request.headers.get(
         "CF-Connecting-IP",
         request.headers.get("X-Forwarded-For", request.remote),
     )
-    _LOGGER.info(
+    level = logging.DEBUG if request.path in _QUIET_PATHS else logging.INFO
+    _LOGGER.log(
+        level,
         "HTTP %s %s from %s WS-Proto=%s UA=%s",
         request.method,
         request.path_qs,
@@ -448,11 +454,21 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
         except Exception:
             _LOGGER.exception("AUTO-THROTTLE: failed to set 0A")
 
+    # OCPP actions that are routine polling noise (log at DEBUG)
+    _QUIET_OCPP = {"MeterValues", "Heartbeat"}
+
     async def charger_to_upstream():
         async for msg in ws:
             if msg.type != web.WSMsgType.TEXT:
                 break
-            _LOGGER.info("CHARGER -> UPSTREAM: %s", msg.data)
+            # Reduce noise: MeterValues and Heartbeat at DEBUG, everything else at INFO
+            try:
+                parsed = json.loads(msg.data)
+                action = parsed[2] if len(parsed) > 2 and isinstance(parsed[2], str) else ""
+            except (json.JSONDecodeError, IndexError):
+                action = ""
+            level = logging.DEBUG if action in _QUIET_OCPP else logging.INFO
+            _LOGGER.log(level, "CHARGER -> UPSTREAM: %s", msg.data)
             sniff_result = _sniff(msg.data)
             if sniff_result in ("start", "charging") and _auto_throttle:
                 asyncio.create_task(throttle_to_zero())
@@ -497,7 +513,14 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
     async def upstream_to_charger_loop(u_ws):
         try:
             async for raw in u_ws:
-                _LOGGER.info("UPSTREAM -> CHARGER: %s", raw)
+                # Most upstream responses are empty acks [3,"id",{}]. Log at DEBUG.
+                try:
+                    parsed = json.loads(raw)
+                    is_empty_ack = (len(parsed) == 3 and parsed[0] == 3 and parsed[2] == {})
+                except (json.JSONDecodeError, IndexError):
+                    is_empty_ack = False
+                level = logging.DEBUG if is_empty_ack else logging.INFO
+                _LOGGER.log(level, "UPSTREAM -> CHARGER: %s", raw)
                 _sniff(raw)
                 try:
                     await ws.send_str(raw)
