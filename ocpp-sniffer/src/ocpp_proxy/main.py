@@ -205,7 +205,7 @@ async def log_all_requests(request, handler):
     )
     prefix = "[...]" if request.path in ("/meter_values", "/charger_info") else "[LOG]"
     _LOGGER.info(
-        "[LOG] %s HTTP %s %s from %s WS-Proto=%s UA=%s",
+        "%s HTTP %s %s from %s WS-Proto=%s UA=%s",
         prefix,
         request.method,
         request.path_qs,
@@ -459,7 +459,7 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
             except Exception:
                 _action = ""
             _prefix = "[...]" if _action in ("MeterValues", "Heartbeat") else "[LOG]"
-            _LOGGER.info("[LOG] %s CHARGER -> UPSTREAM: %s", _prefix, msg.data)
+            _LOGGER.info("%s CHARGER -> UPSTREAM: %s", _prefix, msg.data)
             sniff_result = _sniff(msg.data)
             if sniff_result in ("start", "charging") and _auto_throttle:
                 asyncio.create_task(throttle_to_zero())
@@ -509,7 +509,7 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
                 except Exception:
                     _is_ack = False
                 _prefix = "[...]" if _is_ack else "[LOG]"
-                _LOGGER.info("[LOG] %s UPSTREAM -> CHARGER: %s", _prefix, raw)
+                _LOGGER.info("%s UPSTREAM -> CHARGER: %s", _prefix, raw)
                 _sniff(raw)
                 try:
                     await ws.send_str(raw)
