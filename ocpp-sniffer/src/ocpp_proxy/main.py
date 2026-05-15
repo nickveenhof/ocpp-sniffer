@@ -571,9 +571,9 @@ async def enable_handler(request: web.Request) -> web.Response:
 
     # Disable eco_mode before enabling charging (eco_mode blocks OCPP)
     # Non-blocking: disable eco_mode in background, send SetChargingProfile immediately.
-    # The Wallbox may reject the first profile while eco_mode transitions,
-    # but EVCC will retry on the next cycle (30s).
-    if enable and not _charging_enabled and _ECO_MODE_MANAGEMENT:
+    # Check _ECO_MODE_ENABLED (not _charging_enabled) because the state file may
+    # persist _charging_enabled=True across restarts while eco_mode was restored.
+    if enable and _ECO_MODE_ENABLED and _ECO_MODE_MANAGEMENT:
         async def _disable_eco_then_enable():
             _LOGGER.info("Disabling eco_mode before enabling charging")
             success = await set_eco_mode(False)
@@ -882,9 +882,19 @@ async def init_app() -> web.Application:
             "Auto-throttle enabled: charger set to 0A on StartTransaction, evcc controls via /enable"
         )
     if _ECO_MODE_MANAGEMENT and _ECO_MODE_ENTITY:
-        _LOGGER.info(
-            "eco_mode management enabled: entity=%s", _ECO_MODE_ENTITY
-        )
+        # Sync _ECO_MODE_ENABLED with actual HA entity state on startup
+        actual = _get_eco_mode_state()
+        if actual != "unknown":
+            _ECO_MODE_ENABLED = (actual == "eco_mode")
+            _LOGGER.info(
+                "eco_mode management enabled: entity=%s, current state=%s, tracked=%s",
+                _ECO_MODE_ENTITY, actual, "ON" if _ECO_MODE_ENABLED else "OFF"
+            )
+        else:
+            _LOGGER.info(
+                "eco_mode management enabled: entity=%s (could not read initial state)",
+                _ECO_MODE_ENTITY
+            )
     if config.charger_password:
         _LOGGER.info(
             "Charger password configured: only authenticated chargers accepted"
