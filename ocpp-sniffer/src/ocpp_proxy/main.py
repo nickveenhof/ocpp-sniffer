@@ -251,16 +251,9 @@ def _sniff(raw: str) -> str:
                 _charging_enabled = False
                 _LOGGER.info("Session ended: reset charging_enabled to False")
                 _save_state()
-                # Re-enable eco_mode after session ends (delay to avoid rapid toggle)
-                async def _delayed_eco_restore():
-                    await asyncio.sleep(10)
-                    # Only restore if still not charging (EVCC might start again)
-                    if not _charging_enabled:
-                        _LOGGER.info("Re-enabling eco_mode after session end")
-                        await set_eco_mode(True)
-                    else:
-                        _LOGGER.info("Skipping eco_mode restore: charging re-enabled")
-                asyncio.create_task(_delayed_eco_restore())
+                # eco_mode restore is handled by /enable/false handler, not here.
+                # StatusNotification "Available" can fire mid-session (e.g. replug)
+                # and would prematurely restore eco_mode, blocking the next charge.
             if ocpp_status == "Charging" and not _charging_enabled:
                 return "charging"
 
