@@ -208,19 +208,9 @@ async def log_all_requests(request, handler):
         request.headers.get("X-Forwarded-For", request.remote),
     )
     if request.path in _QUIET_PATHS:
-        _LOGGER.info(
-            "[POLL] %s %s",
-            request.method,
-            request.path,
-        )
+        _LOGGER.info("[DEBUG] %s %s", request.method, request.path)
     else:
-        _LOGGER.info(
-            "[ACTION] HTTP %s %s from %s UA=%s",
-            request.method,
-            request.path_qs,
-            real_ip,
-            request.headers.get("User-Agent", ""),
-        )
+        _LOGGER.info("[INFO] HTTP %s %s from %s", request.method, request.path_qs, real_ip)
     return await handler(request)
 
 
@@ -468,41 +458,10 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
                 action = parsed[2] if len(parsed) > 2 and isinstance(parsed[2], str) else ""
             except (json.JSONDecodeError, IndexError):
                 action = ""
-            if action == "MeterValues":
-                try:
-                    sv = parsed[3]["meterValue"][0]["sampledValue"]
-                    power = current_l1 = current_l2 = current_l3 = energy = 0.0
-                    for s in sv:
-                        m = s.get("measurand", "")
-                        v = float(s.get("value", 0))
-                        if m == "Power.Active.Import":
-                            power = v
-                        elif m == "Energy.Active.Import.Register":
-                            energy = v
-                        elif m == "Current.Import":
-                            phase = s.get("phase", "")
-                            if phase == "L1":
-                                current_l1 = v
-                            elif phase == "L2":
-                                current_l2 = v
-                            elif phase == "L3":
-                                current_l3 = v
-                    _LOGGER.info(
-                        "[METER] %.0fW [%.1f/%.1f/%.1f]A %.0fWh",
-                        power, current_l1, current_l2, current_l3, energy,
-                    )
-                except Exception:
-                    _LOGGER.info("[METER] %s", msg.data[:200])
-            elif action == "Heartbeat":
-                _LOGGER.info("[HEARTBEAT]")
-            elif action == "StatusNotification":
-                _LOGGER.info("[STATUS] %s", msg.data)
-            elif action in ("StartTransaction", "StopTransaction", "Authorize"):
-                _LOGGER.info("[SESSION] %s", msg.data)
-            elif action == "BootNotification":
-                _LOGGER.info("[BOOT] %s", msg.data)
+            if action in ("MeterValues", "Heartbeat"):
+                _LOGGER.info("[DEBUG] CHARGER %s", action)
             else:
-                _LOGGER.info("[OCPP] %s", msg.data)
+                _LOGGER.info("[INFO] CHARGER %s: %s", action, msg.data)
             sniff_result = _sniff(msg.data)
             if sniff_result in ("start", "charging") and _auto_throttle:
                 asyncio.create_task(throttle_to_zero())
@@ -553,8 +512,10 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
                     is_empty_ack = (len(parsed) == 3 and parsed[0] == 3 and parsed[2] == {})
                 except (json.JSONDecodeError, IndexError):
                     is_empty_ack = False
-                if not is_empty_ack:
-                    _LOGGER.info("[UPSTREAM] %s", raw)
+                if is_empty_ack:
+                    _LOGGER.info("[DEBUG] UPSTREAM ack")
+                else:
+                    _LOGGER.info("[INFO] UPSTREAM: %s", raw)
                 _sniff(raw)
                 try:
                     await ws.send_str(raw)
@@ -859,7 +820,7 @@ async def remote_start_handler(request: web.Request) -> web.Response:
     try:
         payload = {"connectorId": 1, "idTag": id_tag}
         response = await _send_to_charger("RemoteStartTransaction", payload)
-        _LOGGER.info("RemoteStartTransaction: idTag=%s response=%s", id_tag, response)
+        _LOGGER.info("[INFO] RemoteStartTransaction: idTag=%s response=%s", id_tag, response)
         return web.json_response(
             {"action": "RemoteStartTransaction", "id_tag": id_tag, "response": response}
         )
@@ -879,7 +840,7 @@ async def remote_stop_handler(request: web.Request) -> web.Response:
         response = await _send_to_charger(
             "RemoteStopTransaction", {"transactionId": txn_id}
         )
-        _LOGGER.info("RemoteStopTransaction: txn=%s response=%s", txn_id, response)
+        _LOGGER.info("[INFO] RemoteStopTransaction: txn=%s response=%s", txn_id, response)
         return web.json_response(
             {
                 "action": "RemoteStopTransaction",
@@ -907,7 +868,7 @@ async def remote_restart_handler(request: web.Request) -> web.Response:
                 "RemoteStopTransaction", {"transactionId": txn_id}
             )
             results["stop"] = {"transaction_id": txn_id, "response": stop_resp}
-            _LOGGER.info("RemoteStopTransaction: txn=%s response=%s", txn_id, stop_resp)
+            _LOGGER.info("[INFO] RemoteStopTransaction: txn=%s response=%s", txn_id, stop_resp)
             await asyncio.sleep(2)
         except asyncio.TimeoutError:
             results["stop"] = {"error": "charger did not respond"}
@@ -918,7 +879,7 @@ async def remote_restart_handler(request: web.Request) -> web.Response:
             "RemoteStartTransaction", {"connectorId": 1, "idTag": id_tag}
         )
         results["start"] = {"id_tag": id_tag, "response": start_resp}
-        _LOGGER.info("RemoteStartTransaction: idTag=%s response=%s", id_tag, start_resp)
+        _LOGGER.info("[INFO] RemoteStartTransaction: idTag=%s response=%s", id_tag, start_resp)
     except asyncio.TimeoutError:
         results["start"] = {"error": "charger did not respond"}
     except Exception as e:
@@ -957,7 +918,7 @@ async def init_app() -> web.Application:
             "Charger password configured: only authenticated chargers accepted"
         )
     else:
-        _LOGGER.warning("No charger password set: any charger can connect")
+        _LOGGER.warning("[WARN] No charger password set: any charger can connect")
 
     # Disable aiohttp's built-in access logger (we handle logging in our middleware)
     logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
