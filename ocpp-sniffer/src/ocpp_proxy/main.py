@@ -54,14 +54,19 @@ async def set_eco_mode(enabled: bool):
     global _ECO_MODE_ENABLED
     if not _ECO_MODE_MANAGEMENT or not _ECO_MODE_ENTITY:
         return True
-    # Change 4: verify actual HA state before skipping
+    # Verify actual HA state before skipping. Treat anything other than "off" as ON
+    # (covers "eco_mode", "full_solar", or any future Wallbox mode).
     loop = asyncio.get_event_loop()
     actual = await loop.run_in_executor(None, _get_eco_mode_state)
-    actual_is_on = (actual == "eco_mode")
-    if enabled == actual_is_on:
-        _ECO_MODE_ENABLED = enabled
-        _LOGGER.info("[LOG] eco_mode already %s (verified from HA), skipping", "ON" if enabled else "OFF")
-        return True
+    if actual == "unknown":
+        # Cannot determine state, proceed with the toggle attempt
+        pass
+    else:
+        actual_is_on = (actual != "off")
+        if enabled == actual_is_on:
+            _ECO_MODE_ENABLED = enabled
+            _LOGGER.info("[LOG] eco_mode already %s (verified from HA, state=%s), skipping", "ON" if enabled else "OFF", actual)
+            return True
 
     option = "eco_mode" if enabled else "off"
 
@@ -127,15 +132,16 @@ async def _ensure_eco_mode_off() -> bool:
     if actual == "off":
         _ECO_MODE_ENABLED = False
         return True
-    if actual == "eco_mode":
+    if actual == "unknown":
+        _LOGGER.warning("[LOG] eco_mode state unknown, attempting disable anyway")
+    else:
+        # Any state other than "off" (eco_mode, full_solar, etc.) means it is ON
         _ECO_MODE_ENABLED = True
-        _LOGGER.info("[LOG] eco_mode is ON (actual HA state), disabling...")
-        success = await set_eco_mode(False)
-        if success:
-            return True
-        _LOGGER.error("[LOG] eco_mode disable failed")
-        return False
-    _LOGGER.warning("[LOG] eco_mode state unknown: %s", actual)
+        _LOGGER.info("[LOG] eco_mode is ON (actual HA state: %s), disabling...", actual)
+    success = await set_eco_mode(False)
+    if success:
+        return True
+    _LOGGER.error("[LOG] eco_mode disable failed")
     return False
 
 
@@ -148,13 +154,14 @@ async def _eco_mode_bounce_guard():
             return
         loop = asyncio.get_event_loop()
         actual = await loop.run_in_executor(None, _get_eco_mode_state)
-        if actual == "eco_mode":
-            _LOGGER.warning("[LOG] Bounce guard: eco_mode bounced back to ON at check %d/6, re-disabling", i + 1)
-            await set_eco_mode(False)
-        elif actual == "off":
+        if actual == "off":
             pass  # Good, still off
+        elif actual == "unknown":
+            _LOGGER.warning("[LOG] Bounce guard: eco_mode state unknown at check %d/6", i + 1)
         else:
-            _LOGGER.warning("[LOG] Bounce guard: eco_mode state unknown: %s", actual)
+            # Any non-off state (eco_mode, full_solar, etc.) means it bounced back
+            _LOGGER.warning("[LOG] Bounce guard: eco_mode bounced to '%s' at check %d/6, re-disabling", actual, i + 1)
+            await set_eco_mode(False)
     _LOGGER.info("[LOG] Bounce guard: 60s monitoring complete, eco_mode stable")
 
 _charger_info: dict = {
@@ -267,11 +274,12 @@ async def log_all_requests(request, handler):
     return await handler(request)
 
 
-def _sniff(raw: str) -> str:
-    """Sniff OCPP messages. Returns 'start' for StartTransaction, 'charging' for StatusNotification:Charging, '' otherwise."""
+def _sniff(raw: str, pre_parsed: list | None = None) -> str:
+    """Sniff OCPP messages. Returns 'start' for StartTransaction, 'charging' for StatusNotification:Charging, '' otherwise.
+    If pre_parsed is provided, skips JSON parsing."""
     global _charging_enabled
     try:
-        msg = json.loads(raw)
+        msg = pre_parsed if pre_parsed is not None else json.loads(raw)
         if not isinstance(msg, list) or len(msg) < 3:
             return ""
         msg_type = msg[0]
@@ -468,7 +476,6 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
     pending_charger_msgs: asyncio.Queue = asyncio.Queue()
 
     async def throttle_to_zero():
-        global _charging_enabled
         await asyncio.sleep(1)
         if _charging_enabled:
             _log_noise(
@@ -476,7 +483,6 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
                 _max_current_amps,
             )
             return
-        _charging_enabled = False
         try:
             _LOGGER.info("[LOG] AUTO-THROTTLE: clearing all charging profiles")
             await _send_to_charger("ClearChargingProfile", {"connectorId": 1})
@@ -499,24 +505,20 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
                 _log_noise("CHARGER -> UPSTREAM: %s", msg.data)
             else:
                 _LOGGER.info("[LOG] CHARGER -> UPSTREAM: %s", msg.data)
-            sniff_result = _sniff(msg.data)
+            sniff_result = _sniff(msg.data, _parsed)
             if sniff_result in ("start", "charging") and _auto_throttle:
                 asyncio.create_task(throttle_to_zero())
-            try:
-                parsed = json.loads(msg.data)
-                if (
-                    isinstance(parsed, list)
-                    and len(parsed) >= 2
-                    and parsed[0] == 3
-                    and parsed[1] in _pending_responses
-                ):
-                    _log_noise(
-                        "FILTERED: not forwarding injected response %s to upstream",
-                        parsed[1],
-                    )
-                    continue
-            except (json.JSONDecodeError, TypeError):
-                pass
+            if (
+                isinstance(_parsed, list)
+                and len(_parsed) >= 2
+                and _parsed[0] == 3
+                and _parsed[1] in _pending_responses
+            ):
+                _log_noise(
+                    "FILTERED: not forwarding injected response %s to upstream",
+                    _parsed[1],
+                )
+                continue
             await pending_charger_msgs.put(msg.data)
 
     async def upstream_relay():
@@ -552,7 +554,7 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
                     _log_noise("UPSTREAM -> CHARGER: %s", raw)
                 else:
                     _LOGGER.info("[LOG] UPSTREAM -> CHARGER: %s", raw)
-                _sniff(raw)
+                _sniff(raw, _parsed_up)
                 try:
                     await ws.send_str(raw)
                 except Exception:
@@ -660,11 +662,11 @@ async def enable_handler(request: web.Request) -> web.Response:
                     {"error": "eco_mode disable failed", "enable": True, "sent": False}, status=503
                 )
 
-        _charging_enabled = True
-        _save_state()
         limit = _max_current_amps
         try:
             response = await _send_to_charger("SetChargingProfile", _build_tx_profile(limit))
+            _charging_enabled = True
+            _save_state()
             if was_already_enabled:
                 _LOGGER.info("[LOG] enable=True: re-sent SetChargingProfile %dA (was already enabled, re-verified eco_mode)", limit)
             else:
@@ -716,9 +718,9 @@ async def enable_handler(request: web.Request) -> web.Response:
         asyncio.create_task(_delayed_eco_restore_on_disable())
 
     try:
+        response = await _send_to_charger("SetChargingProfile", _build_tx_profile(0))
         _charging_enabled = False
         _save_state()
-        response = await _send_to_charger("SetChargingProfile", _build_tx_profile(0))
         return web.json_response(
             {"action": "SetChargingProfile", "enable": False, "limit_amps": 0, "sent": True, "response": response}
         )
