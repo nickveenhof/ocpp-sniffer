@@ -1,5 +1,5 @@
 name: OCPP Sniffer
-version: '0.6.5'
+version: '0.7.0'
 slug: ocpp-sniffer
 description: 'Transparent OCPP proxy that forwards charger traffic to your CPO, captures RFID idTags, and manages Wallbox eco_mode for EVCC integration'
 homeassistant_api: true
@@ -18,6 +18,7 @@ options:
   auto_throttle: true
   eco_mode_entity: 'select.wallbox_pulsar_pro_sn_1371062_solar_charging'
   eco_mode_management: true
+  log_noise: false
 schema:
   upstream_url: str
   charger_password: str?
@@ -25,3 +26,4 @@ schema:
   auto_throttle: "bool?"
   eco_mode_entity: str?
   eco_mode_management: "bool?"
+  log_noise: "bool?"

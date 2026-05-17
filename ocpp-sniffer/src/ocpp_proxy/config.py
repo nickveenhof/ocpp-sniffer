@@ -47,3 +47,7 @@ class Config:
     @property
     def eco_mode_management(self) -> bool:
         return bool(self._cfg.get("eco_mode_management", True))
+
+    @property
+    def log_noise(self) -> bool:
+        return bool(self._cfg.get("log_noise", False))
