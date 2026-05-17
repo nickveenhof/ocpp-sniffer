@@ -791,6 +791,7 @@ async def welcome_handler(_request: web.Request) -> web.Response:
   <li><a href="/status">/status</a> - upstream URL and connection state</li>
   <li><a href="/sessions">/sessions</a> - all sessions JSON</li>
   <li><a href="/sessions.csv">/sessions.csv</a> - all sessions CSV</li>
+  <li><a href="/logs">/logs</a> - persistent [LOG] entries (?lines=N, ?search=text, ?format=json)</li>
 </ul>
 <h2>Command endpoints (POST)</h2>
 <ul>
@@ -920,6 +921,24 @@ async def init_app() -> web.Application:
     app["config"] = config
     app["event_logger"] = EventLogger(db_path=os.getenv("LOG_DB_PATH", "usage_log.db"))
 
+    async def logs_handler(request: web.Request) -> web.Response:
+        """Serve persistent [LOG] entries. ?lines=N (default 200), ?search=text."""
+        log_path = "/data/ocpp-sniffer.log"
+        lines_param = int(request.query.get("lines", "200"))
+        search = request.query.get("search", "").lower()
+        try:
+            with open(log_path, "r") as f:
+                all_lines = f.readlines()
+        except FileNotFoundError:
+            all_lines = []
+        if search:
+            all_lines = [l for l in all_lines if search in l.lower()]
+        tail = all_lines[-lines_param:]
+        fmt = request.query.get("format", "text")
+        if fmt == "json":
+            return web.json_response({"lines": [l.rstrip() for l in tail], "total": len(all_lines)})
+        return web.Response(text="".join(tail), content_type="text/plain")
+
     app.add_routes(
         [
             web.get("/", welcome_handler),
@@ -938,6 +957,7 @@ async def init_app() -> web.Application:
             web.post("/remote_start/{id_tag}", remote_start_handler),
             web.post("/remote_stop", remote_stop_handler),
             web.post("/remote_restart/{id_tag}", remote_restart_handler),
+            web.get("/logs", logs_handler),
         ]
     )
     return app

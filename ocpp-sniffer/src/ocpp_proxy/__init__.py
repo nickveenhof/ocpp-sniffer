@@ -1,3 +1,3 @@
 """OCPP 1.6 EV Charger Proxy Home Assistant Add-on."""
 
-__version__ = "0.6.4"
+__version__ = "0.6.5"
