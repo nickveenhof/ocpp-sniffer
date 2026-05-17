@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import logging
+import logging.handlers
 import os
 import time
 import uuid
@@ -942,8 +943,28 @@ async def init_app() -> web.Application:
     return app
 
 
+class _LogPrefixFilter(logging.Filter):
+    """Only pass log records containing [LOG] to the file handler."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "[LOG]" in record.getMessage()
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
+
+    # Persistent log file for [LOG] messages only (survives container restarts)
+    log_path = "/data/ocpp-sniffer.log"
+    try:
+        fh = logging.handlers.RotatingFileHandler(
+            log_path, maxBytes=5 * 1024 * 1024, backupCount=3  # 5MB x 3 = 15MB max
+        )
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        fh.addFilter(_LogPrefixFilter())
+        logging.getLogger().addHandler(fh)
+    except Exception as e:
+        logging.getLogger(__name__).warning("[LOG] Could not create log file %s: %s", log_path, e)
+
     app = asyncio.run(init_app())
     web.run_app(app, port=int(os.getenv("PORT", 9000)))
 
