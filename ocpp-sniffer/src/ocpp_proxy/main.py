@@ -1,7 +1,5 @@
 import asyncio
 import base64
-import csv
-import io
 import json
 import logging
 import os
@@ -13,7 +11,6 @@ import websockets
 from aiohttp import WSCloseCode, web
 
 from .config import Config
-from .logger import EventLogger
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -331,7 +328,10 @@ def _sniff(raw: str, pre_parsed: list | None = None) -> str:
             _charger_info["serial"] = payload.get("chargePointSerialNumber")
 
         if action == "StatusNotification":
-            connector_id = payload.get("connectorId", 1)
+            connector_id = payload.get("connectorId")
+            if connector_id is None:
+                _LOGGER.warning("[LOG] StatusNotification missing connectorId, skipping")
+                return ""
             ocpp_status = payload.get("status", "")
             if connector_id == 0:
                 _log_noise(
@@ -456,7 +456,7 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
             )
             return web.Response(status=401, text="Unauthorized")
 
-    ws = web.WebSocketResponse(protocols=("ocpp1.6", "ocpp2.0.1"))
+    ws = web.WebSocketResponse(protocols=("ocpp1.6",))
     await ws.prepare(request)
 
     upstream_url = config.upstream_url or None
@@ -766,32 +766,6 @@ async def maxcurrent_handler(request: web.Request) -> web.Response:
         return web.json_response({"error": str(e)}, status=500)
 
 
-async def sessions_json(request: web.Request) -> web.Response:
-    sessions = request.app["event_logger"].get_sessions()
-    return web.json_response(sessions)
-
-
-async def sessions_csv(request: web.Request) -> web.Response:
-    sessions = request.app["event_logger"].get_sessions()
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(
-        ["timestamp", "backend_id", "duration_s", "energy_kwh", "revenue", "id_tag"]
-    )
-    for s in sessions:
-        writer.writerow(
-            [
-                s["timestamp"],
-                s["backend_id"],
-                s["duration_s"],
-                s["energy_kwh"],
-                s["revenue"],
-                s.get("id_tag", ""),
-            ]
-        )
-    return web.Response(text=output.getvalue(), content_type="text/csv")
-
-
 async def status_handler(request: web.Request) -> web.Response:
     return web.json_response(
         {
@@ -832,8 +806,6 @@ async def welcome_handler(_request: web.Request) -> web.Response:
   <li><a href="/last_session">/last_session</a> - last completed charging session</li>
   <li><a href="/data_transfer">/data_transfer</a> - vendor DataTransfer messages (last 20)</li>
   <li><a href="/status">/status</a> - upstream URL and connection state</li>
-  <li><a href="/sessions">/sessions</a> - all sessions JSON</li>
-  <li><a href="/sessions.csv">/sessions.csv</a> - all sessions CSV</li>
 </ul>
 <h2>Command endpoints (POST)</h2>
 <ul>
@@ -962,15 +934,12 @@ async def init_app() -> web.Application:
     logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
     app = web.Application(middlewares=[log_all_requests])
     app["config"] = config
-    app["event_logger"] = EventLogger(db_path=os.getenv("LOG_DB_PATH", "usage_log.db"))
 
     app.add_routes(
         [
             web.get("/", welcome_handler),
             web.get("/charger", charger_handler),
             web.get("/charger/{charger_id}", charger_handler),
-            web.get("/sessions", sessions_json),
-            web.get("/sessions.csv", sessions_csv),
             web.get("/status", status_handler),
             web.get("/charger_info", charger_info_handler),
             web.get("/meter_values", meter_values_handler),

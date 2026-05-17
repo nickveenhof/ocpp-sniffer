@@ -64,22 +64,6 @@ class TestReadEndpoints(AioHTTPTestCase):
         data = await resp.json()
         assert data == []
 
-    @unittest_run_loop
-    async def test_sessions_returns_empty(self):
-        resp = await self.client.request("GET", "/sessions")
-        assert resp.status == 200
-        data = await resp.json()
-        assert isinstance(data, list)
-
-    @unittest_run_loop
-    async def test_sessions_csv_returns_header(self):
-        resp = await self.client.request("GET", "/sessions.csv")
-        assert resp.status == 200
-        text = await resp.text()
-        assert "timestamp" in text
-        assert "id_tag" in text
-
-
 class TestCommandEndpointsNoCharger(AioHTTPTestCase):
     async def get_application(self):
         return await init_app()
