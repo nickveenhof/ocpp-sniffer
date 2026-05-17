@@ -83,7 +83,9 @@ class TestSetEcoMode:
         main_mod._ECO_MODE_MANAGEMENT = True
         main_mod._ECO_MODE_ENTITY = "select.test"
         main_mod._ECO_MODE_ENABLED = True
-        result = await main_mod.set_eco_mode(True)
+        # Now verifies actual HA state before skipping
+        with patch("ocpp_proxy.main.requests.get", return_value=_mock_get_state("eco_mode")):
+            result = await main_mod.set_eco_mode(True)
         assert result is True
 
     @pytest.mark.asyncio
@@ -95,8 +97,10 @@ class TestSetEcoMode:
         mock_post_resp = MagicMock()
         mock_post_resp.status_code = 200
 
+        # First GET: actual state check returns eco_mode (needs change)
+        # Second GET: verification returns off (change succeeded)
         with patch("ocpp_proxy.main.requests.post", return_value=mock_post_resp) as mock_post, \
-             patch("ocpp_proxy.main.requests.get", return_value=_mock_get_state("off")), \
+             patch("ocpp_proxy.main.requests.get", side_effect=[_mock_get_state("eco_mode"), _mock_get_state("off")]), \
              patch("asyncio.sleep", _instant_sleep):
             result = await main_mod.set_eco_mode(False)
 
@@ -116,8 +120,10 @@ class TestSetEcoMode:
         mock_post_resp = MagicMock()
         mock_post_resp.status_code = 200
 
+        # First GET: actual state check returns off (needs change)
+        # Second GET: verification returns eco_mode (change succeeded)
         with patch("ocpp_proxy.main.requests.post", return_value=mock_post_resp) as mock_post, \
-             patch("ocpp_proxy.main.requests.get", return_value=_mock_get_state("eco_mode")), \
+             patch("ocpp_proxy.main.requests.get", side_effect=[_mock_get_state("off"), _mock_get_state("eco_mode")]), \
              patch("asyncio.sleep", _instant_sleep):
             result = await main_mod.set_eco_mode(True)
 
@@ -135,7 +141,9 @@ class TestSetEcoMode:
         mock_resp = MagicMock()
         mock_resp.status_code = 500
 
-        with patch("ocpp_proxy.main.requests.post", return_value=mock_resp):
+        # First GET: actual state check returns eco_mode (needs change)
+        with patch("ocpp_proxy.main.requests.post", return_value=mock_resp), \
+             patch("ocpp_proxy.main.requests.get", return_value=_mock_get_state("eco_mode")):
             result = await main_mod.set_eco_mode(False)
 
         assert result is False
@@ -152,8 +160,10 @@ class TestSetEcoMode:
 
         with patch.dict(os.environ, {"SUPERVISOR_TOKEN": "test-token-123"}):
             main_mod._HA_TOKEN = os.getenv("SUPERVISOR_TOKEN", "")
+            # First GET: actual state check returns eco_mode (needs change)
+            # Second GET: verification returns off
             with patch("ocpp_proxy.main.requests.post", return_value=mock_resp) as mock_post, \
-                 patch("ocpp_proxy.main.requests.get", return_value=_mock_get_state("off")), \
+                 patch("ocpp_proxy.main.requests.get", side_effect=[_mock_get_state("eco_mode"), _mock_get_state("off")]), \
                  patch("asyncio.sleep", _instant_sleep):
                 await main_mod.set_eco_mode(False)
 
@@ -170,15 +180,15 @@ class TestSetEcoMode:
         mock_post_resp = MagicMock()
         mock_post_resp.status_code = 200
 
-        # First GET returns wrong state, second returns correct
-        wrong_state = MagicMock()
-        wrong_state.status_code = 200
-        wrong_state.json.return_value = {"state": "eco_mode"}
-
-        right_state = _mock_get_state("off")
-
+        # GET 1: actual state check returns eco_mode (needs change)
+        # GET 2: first verify returns eco_mode (wrong, still on)
+        # GET 3: second verify after retry returns off (correct)
         with patch("ocpp_proxy.main.requests.post", return_value=mock_post_resp), \
-             patch("ocpp_proxy.main.requests.get", side_effect=[wrong_state, right_state]), \
+             patch("ocpp_proxy.main.requests.get", side_effect=[
+                 _mock_get_state("eco_mode"),  # actual state check
+                 _mock_get_state("eco_mode"),  # first verify fails
+                 _mock_get_state("off"),        # retry verify succeeds
+             ]), \
              patch("asyncio.sleep", _instant_sleep):
             result = await main_mod.set_eco_mode(False)
 

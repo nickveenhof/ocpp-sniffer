@@ -15,6 +15,7 @@ from aiohttp import WSCloseCode, web
 from .config import Config
 from .logger import EventLogger
 
+_LOGGER = logging.getLogger(__name__)
 
 # --- Wallbox eco_mode toggle via Home Assistant API ---
 # eco_mode must be OFF for OCPP charging to work.
@@ -79,7 +80,6 @@ async def set_eco_mode(enabled: bool):
         )
         return resp.status_code in (200, 201)
 
-    loop = asyncio.get_event_loop()
     success = await loop.run_in_executor(None, _call_ha)
     if not success:
         _LOGGER.error("[LOG] Failed to set eco_mode to %s via HA (API call failed)", "ON" if enabled else "OFF")
@@ -111,8 +111,6 @@ async def set_eco_mode(enabled: bool):
 
     _LOGGER.error("[LOG] eco_mode FAILED after retry (expected %s, got %s)", option, actual)
     return False
-
-_LOGGER = logging.getLogger(__name__)
 
 
 def _log_noise(msg: str, *args):
@@ -483,22 +481,7 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
             _LOGGER.info("[LOG] AUTO-THROTTLE: clearing all charging profiles")
             await _send_to_charger("ClearChargingProfile", {"connectorId": 1})
             _LOGGER.info("[LOG] AUTO-THROTTLE: setting current to 0A")
-            await _send_to_charger(
-                "SetChargingProfile",
-                {
-                    "connectorId": 1,
-                    "csChargingProfiles": {
-                        "chargingProfileId": 2,
-                        "stackLevel": 1,
-                        "chargingProfilePurpose": "TxProfile",
-                        "chargingProfileKind": "Absolute",
-                        "chargingSchedule": {
-                            "chargingRateUnit": "A",
-                            "chargingSchedulePeriod": [{"startPeriod": 0, "limit": 0}],
-                        },
-                    },
-                },
-            )
+            await _send_to_charger("SetChargingProfile", _build_tx_profile(0))
             _LOGGER.info("[LOG] AUTO-THROTTLE: charger set to 0A")
         except Exception:
             _LOGGER.exception("[LOG] AUTO-THROTTLE: failed to set 0A")
@@ -508,7 +491,8 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
             if msg.type != web.WSMsgType.TEXT:
                 break
             try:
-                _action = json.loads(msg.data)[2] if len(json.loads(msg.data)) > 2 else ""
+                _parsed = json.loads(msg.data)
+                _action = _parsed[2] if len(_parsed) > 2 else ""
             except Exception:
                 _action = ""
             if _action in ("MeterValues", "Heartbeat"):
@@ -560,7 +544,8 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
         try:
             async for raw in u_ws:
                 try:
-                    _is_ack = (json.loads(raw)[0] == 3 and json.loads(raw)[2] == {})
+                    _parsed_up = json.loads(raw)
+                    _is_ack = (_parsed_up[0] == 3 and _parsed_up[2] == {})
                 except Exception:
                     _is_ack = False
                 if _is_ack:
@@ -590,6 +575,23 @@ async def charger_handler(request: web.Request) -> web.WebSocketResponse:
             await upstream_ws.close()
         await ws.close(code=WSCloseCode.GOING_AWAY)
     return ws
+
+
+def _build_tx_profile(limit_amps: int) -> dict:
+    """Build a TxProfile SetChargingProfile payload."""
+    return {
+        "connectorId": 1,
+        "csChargingProfiles": {
+            "chargingProfileId": 2,
+            "stackLevel": 1,
+            "chargingProfilePurpose": "TxProfile",
+            "chargingProfileKind": "Absolute",
+            "chargingSchedule": {
+                "chargingRateUnit": "A",
+                "chargingSchedulePeriod": [{"startPeriod": 0, "limit": limit_amps}],
+            },
+        },
+    }
 
 
 async def _send_to_charger(action: str, payload: dict, timeout: float = 10.0) -> dict:
@@ -647,7 +649,11 @@ async def enable_handler(request: web.Request) -> web.Response:
         # Change 1: Synchronous eco_mode disable. Do NOT send profile until eco_mode is OFF.
         if _ECO_MODE_MANAGEMENT:
             # Change 4: Read actual HA state, not in-memory flag
-            eco_off = await _ensure_eco_mode_off()
+            try:
+                eco_off = await asyncio.wait_for(_ensure_eco_mode_off(), timeout=15)
+            except asyncio.TimeoutError:
+                _LOGGER.error("[LOG] enable=True: eco_mode check timed out after 15s")
+                eco_off = False
             if not eco_off:
                 _LOGGER.error("[LOG] enable=True: eco_mode could not be disabled, aborting")
                 return web.json_response(
@@ -657,21 +663,8 @@ async def enable_handler(request: web.Request) -> web.Response:
         _charging_enabled = True
         _save_state()
         limit = _max_current_amps
-        payload = {
-            "connectorId": 1,
-            "csChargingProfiles": {
-                "chargingProfileId": 2,
-                "stackLevel": 1,
-                "chargingProfilePurpose": "TxProfile",
-                "chargingProfileKind": "Absolute",
-                "chargingSchedule": {
-                    "chargingRateUnit": "A",
-                    "chargingSchedulePeriod": [{"startPeriod": 0, "limit": limit}],
-                },
-            },
-        }
         try:
-            response = await _send_to_charger("SetChargingProfile", payload)
+            response = await _send_to_charger("SetChargingProfile", _build_tx_profile(limit))
             if was_already_enabled:
                 _LOGGER.info("[LOG] enable=True: re-sent SetChargingProfile %dA (was already enabled, re-verified eco_mode)", limit)
             else:
@@ -725,20 +718,7 @@ async def enable_handler(request: web.Request) -> web.Response:
     try:
         _charging_enabled = False
         _save_state()
-        payload = {
-            "connectorId": 1,
-            "csChargingProfiles": {
-                "chargingProfileId": 2,
-                "stackLevel": 1,
-                "chargingProfilePurpose": "TxProfile",
-                "chargingProfileKind": "Absolute",
-                "chargingSchedule": {
-                    "chargingRateUnit": "A",
-                    "chargingSchedulePeriod": [{"startPeriod": 0, "limit": 0}],
-                },
-            },
-        }
-        response = await _send_to_charger("SetChargingProfile", payload)
+        response = await _send_to_charger("SetChargingProfile", _build_tx_profile(0))
         return web.json_response(
             {"action": "SetChargingProfile", "enable": False, "limit_amps": 0, "sent": True, "response": response}
         )
@@ -769,20 +749,7 @@ async def maxcurrent_handler(request: web.Request) -> web.Response:
             }
         )
     try:
-        payload = {
-            "connectorId": 1,
-            "csChargingProfiles": {
-                "chargingProfileId": 2,
-                "stackLevel": 1,
-                "chargingProfilePurpose": "TxProfile",
-                "chargingProfileKind": "Absolute",
-                "chargingSchedule": {
-                    "chargingRateUnit": "A",
-                    "chargingSchedulePeriod": [{"startPeriod": 0, "limit": amps}],
-                },
-            },
-        }
-        response = await _send_to_charger("SetChargingProfile", payload)
+        response = await _send_to_charger("SetChargingProfile", _build_tx_profile(amps))
         return web.json_response(
             {
                 "action": "SetChargingProfile",
@@ -957,7 +924,7 @@ async def remote_restart_handler(request: web.Request) -> web.Response:
 
 
 async def init_app() -> web.Application:
-    global _auto_throttle, _min_current, _ECO_MODE_ENTITY, _ECO_MODE_MANAGEMENT, _LOG_NOISE
+    global _auto_throttle, _min_current, _ECO_MODE_ENTITY, _ECO_MODE_MANAGEMENT, _ECO_MODE_ENABLED, _LOG_NOISE
     config = Config()
     _auto_throttle = config.auto_throttle
     _min_current = config.min_current
